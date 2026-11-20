@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"compress/gzip"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"io/fs"
@@ -220,8 +221,7 @@ func TestServeEndToEnd(t *testing.T) {
 	require.NoError(t, p.cmd.Process.Signal(syscall.SIGTERM))
 	require.NoError(t, p.wait(t), p.stderr.String())
 
-	q := "SELECT event_name, session_id, attrs['api_key'] AS k, attrs['input_tokens'] AS it, attrs['cost_usd'] AS cost, trace_id FROM read_parquet('" + dir +
-		"/services/*/logs/**/*.parquet') ORDER BY time, event_name"
+	q := "SELECT event_name, session_id, attrs['api_key'] AS k, attrs['input_tokens'] AS it, attrs['cost_usd'] AS cost, trace_id FROM logs ORDER BY time, event_name"
 	out, err := runBin(t, "query", "--data-dir", dir, "--format", "json", q)
 	require.NoError(t, err)
 	var rows []map[string]any
@@ -399,7 +399,7 @@ func TestServeOpenShellOCSF(t *testing.T) {
 	require.NoError(t, p.cmd.Process.Signal(syscall.SIGTERM))
 	require.NoError(t, p.wait(t), p.stderr.String())
 
-	from := " FROM read_parquet('" + dir + "/services/*/logs/**/*.parquet') WHERE "
+	from := " FROM logs WHERE "
 	query := func(sql string) []map[string]any {
 		out, err := runBin(t, "query", "--data-dir", dir, "--format", "json", sql)
 		require.NoError(t, err)
@@ -481,7 +481,7 @@ func TestServeTracesFromGoApp(t *testing.T) {
 	rows := queryRows(t, dir, "SELECT trace_id, span_id, parent_span_id, name, kind, status_code, http_request_method, http_route, "+
 		"http_response_status_code, gen_ai_request_model, gen_ai_usage_input_tokens, gen_ai_usage_output_tokens, session_id, "+
 		"attrs['auth_token'] AS tok, len(events) AS n_events, events[1].name AS ev, duration_ns "+
-		"FROM read_parquet('"+dir+"/services/*/spans/**/*.parquet') ORDER BY name")
+		"FROM spans ORDER BY name")
 	require.Len(t, rows, 3)
 	// Byte order sorts the uppercase root first.
 	root, chat, cache := rows[0], rows[1], rows[2]
@@ -542,7 +542,7 @@ func TestServeTracesJSON(t *testing.T) {
 	require.NoError(t, p.wait(t), p.stderr.String())
 
 	rows := queryRows(t, dir, "SELECT name, kind, status_code, http_response_status_code, service_name "+
-		"FROM read_parquet('"+dir+"/services/*/spans/**/*.parquet') ORDER BY name")
+		"FROM spans ORDER BY name")
 	require.Len(t, rows, 2)
 	require.Equal(t, "GET /missing", rows[0]["name"])
 	require.Equal(t, "server", rows[0]["kind"])
@@ -552,4 +552,149 @@ func TestServeTracesJSON(t *testing.T) {
 	require.Equal(t, "lookup", rows[1]["name"])
 	require.Equal(t, "internal", rows[1]["kind"])
 	require.Equal(t, "ok", rows[1]["status_code"])
+}
+
+func TestServeRejectsBadMaintenanceFlags(t *testing.T) {
+	for _, args := range [][]string{{"--seal-min-files", "1"}, {"--retention", "0s"}, {"--max-disk", "0"}, {"--compact-interval", "0s"}, {"--retire-grace", "0s"}} {
+		t.Run(args[0]+"="+args[1], func(t *testing.T) {
+			dir := dataDir(t)
+			cmd := exec.CommandContext(t.Context(), binPath, append([]string{"serve", "--listen", "127.0.0.1:0", "--data-dir", dir}, args...)...)
+			cmd.Env = append(os.Environ(), "HOME="+t.TempDir())
+			out, err := cmd.CombinedOutput()
+			require.Error(t, err)
+			require.Contains(t, string(out), args[0])
+			require.NoFileExists(t, filepath.Join(dir, ".lock"))
+		})
+	}
+}
+
+func countParquet(t *testing.T, root string) int {
+	t.Helper()
+	n := 0
+	require.NoError(t, filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
+		if err != nil && !errors.Is(err, fs.ErrNotExist) {
+			return err
+		}
+		if err == nil && !d.IsDir() && strings.HasSuffix(path, ".parquet") {
+			n++
+		}
+
+		return nil
+	}))
+
+	return n
+}
+
+func TestServeCompaction(t *testing.T) {
+	fixture, err := os.ReadFile(filepath.Join("..", "..", "testdata", "claude_code_logs.json"))
+	require.NoError(t, err)
+	req := plogotlp.NewExportRequest()
+	require.NoError(t, req.UnmarshalJSON(fixture))
+	perPost := req.Logs().LogRecordCount()
+	const posts = 12
+
+	addr := freeAddr(t)
+	dir := dataDir(t)
+	p := startServe(t, addr, dir, "--flush-interval", "50ms", "--compact-interval", "200ms", "--seal-min-files", "3", "--retire-grace", "200ms")
+
+	var svcDir string
+	for i := range posts {
+		before := 0
+		if svcDir != "" {
+			before = countParquet(t, svcDir)
+		}
+		require.Equal(t, http.StatusOK, post(t, "http://"+addr+"/v1/logs", "application/json", fixture))
+		if i == 0 {
+			require.Eventually(t, func() bool {
+				dirs, _ := filepath.Glob(filepath.Join(dir, "services", "*"))
+				if len(dirs) != 1 {
+					return false
+				}
+				svcDir = dirs[0]
+
+				return countParquet(t, svcDir) > 0
+			}, 5*time.Second, 10*time.Millisecond)
+
+			continue
+		}
+		// A file only appears once the flush ran, so the next post lands in a later flush.
+		require.Eventually(t, func() bool { return countParquet(t, svcDir) != before }, 5*time.Second, 10*time.Millisecond)
+	}
+
+	// Sealed files accumulate in the open hour, so the bound is 2*SealMinFiles+1, not 2.
+	logsDir := filepath.Join(svcDir, "logs")
+	require.Eventually(t, func() bool {
+		n := countParquet(t, logsDir)
+
+		return n <= 2*3+1 && n == len(readManifest(t, svcDir)) && readStats(t, dir)["compactions"].(float64) >= 1
+	}, 10*time.Second, 50*time.Millisecond, p.stderr.String())
+
+	require.NoError(t, p.cmd.Process.Signal(syscall.SIGTERM))
+	require.NoError(t, p.wait(t), p.stderr.String())
+
+	want := posts * perPost
+	rows := queryRows(t, dir, "SELECT count(*) AS n FROM logs")
+	require.EqualValues(t, want, rows[0]["n"])
+
+	files := readManifest(t, svcDir)
+	listed := map[string]bool{}
+	var sum int64
+	for _, f := range files {
+		listed[filepath.Join(svcDir, f.Path)] = true
+		sum += f.Rows
+	}
+	require.EqualValues(t, want, sum)
+
+	require.NoError(t, filepath.WalkDir(svcDir, func(path string, d fs.DirEntry, err error) error {
+		require.NoError(t, err)
+		if !d.IsDir() && strings.HasSuffix(path, ".parquet") {
+			require.True(t, listed[path], "unlisted parquet file %s", path)
+		}
+
+		return nil
+	}))
+}
+
+func TestServeStatsWrittenOnChange(t *testing.T) {
+	fixture, err := os.ReadFile(filepath.Join("..", "..", "testdata", "claude_code_logs.json"))
+	require.NoError(t, err)
+
+	addr := freeAddr(t)
+	dir := dataDir(t)
+	p := startServe(t, addr, dir, "--flush-interval", "50ms")
+	statsPath := filepath.Join(dir, "stats.json")
+	mtime := func() time.Time {
+		info, err := os.Stat(statsPath)
+		require.NoError(t, err)
+
+		return info.ModTime()
+	}
+
+	require.Eventually(t, func() bool { _, err := os.Stat(statsPath); return err == nil }, 5*time.Second, 10*time.Millisecond)
+	initial := mtime()
+	time.Sleep(250 * time.Millisecond)
+	require.Equal(t, initial, mtime())
+
+	require.Equal(t, http.StatusOK, post(t, "http://"+addr+"/v1/logs", "application/json", fixture))
+	require.Eventually(t, func() bool { return !mtime().Equal(initial) }, 5*time.Second, 20*time.Millisecond)
+
+	require.NoError(t, p.cmd.Process.Signal(syscall.SIGTERM))
+	require.NoError(t, p.wait(t), p.stderr.String())
+}
+
+type manifestFile struct {
+	Path string `json:"path"`
+	Rows int64  `json:"rows"`
+}
+
+func readManifest(t *testing.T, svcDir string) []manifestFile {
+	t.Helper()
+	raw, err := os.ReadFile(filepath.Join(svcDir, "manifest.json"))
+	require.NoError(t, err)
+	var m struct {
+		Files []manifestFile `json:"files"`
+	}
+	require.NoError(t, json.Unmarshal(raw, &m))
+
+	return m.Files
 }

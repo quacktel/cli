@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"encoding/hex"
@@ -34,6 +35,29 @@ type serveCmd struct {
 	BufferBytes   int64         `help:"Maximum buffered bytes before requests get 429." default:"67108864"`
 	FlushInterval time.Duration `help:"How often buffered logs are written to Parquet." default:"2s"`
 	MaxServices   int           `help:"Maximum number of distinct services." default:"256"`
+
+	Retention       time.Duration `help:"Delete data older than this, in whole hourly partitions." default:"720h"`
+	MaxDisk         int64         `help:"Maximum bytes of Parquet on disk; the oldest closed hours are deleted first." default:"10737418240"`
+	CompactInterval time.Duration `help:"How often compaction and retention run." default:"5m"`
+	SealMinFiles    int           `help:"Tail files in the open hour that trigger a seal. Must be at least 2." default:"10"`
+	RetireGrace     time.Duration `help:"How long a replaced or expired file stays on disk for running queries." default:"60s"`
+}
+
+func (c *serveCmd) validate() error {
+	switch {
+	case c.Retention <= 0:
+		return fmt.Errorf("--retention must be greater than 0, got %s", c.Retention)
+	case c.MaxDisk <= 0:
+		return fmt.Errorf("--max-disk must be greater than 0, got %d", c.MaxDisk)
+	case c.CompactInterval <= 0:
+		return fmt.Errorf("--compact-interval must be greater than 0, got %s", c.CompactInterval)
+	case c.SealMinFiles < 2:
+		return fmt.Errorf("--seal-min-files must be at least 2, got %d", c.SealMinFiles)
+	case c.RetireGrace <= 0:
+		return fmt.Errorf("--retire-grace must be greater than 0, got %s", c.RetireGrace)
+	}
+
+	return nil
 }
 
 type statsFile struct {
@@ -50,10 +74,19 @@ type statsFile struct {
 	FilesWritten    int64     `json:"files_written"`
 	BytesWritten    int64     `json:"bytes_written"`
 	Services        int       `json:"services"`
+	Compactions     int64     `json:"compactions"`
+	FilesRetired    int64     `json:"files_retired"`
+	BytesOnDisk     int64     `json:"bytes_on_disk"`
+	PendingBatches  int64     `json:"pending_batches"`
+	WriteErrors     int64     `json:"write_errors"`
 	UpdatedAt       time.Time `json:"updated_at"`
 }
 
 func (c *serveCmd) Run(ctx context.Context, globals *Globals) error {
+	if err := c.validate(); err != nil {
+		return err
+	}
+
 	dir := c.DataDir
 	if dir == "" {
 		var err error
@@ -78,6 +111,12 @@ func (c *serveCmd) Run(ctx context.Context, globals *Globals) error {
 		BufferBytes:   c.BufferBytes,
 		FlushInterval: c.FlushInterval,
 		Logger:        globals.Logger,
+
+		CompactInterval: c.CompactInterval,
+		SealMinFiles:    c.SealMinFiles,
+		RetireGrace:     c.RetireGrace,
+		Retention:       c.Retention,
+		MaxDiskBytes:    c.MaxDisk,
 	})
 	if err != nil {
 		return fmt.Errorf("failed to open store: %w", err)
@@ -118,7 +157,10 @@ func (c *serveCmd) Run(ctx context.Context, globals *Globals) error {
 
 	globals.Logger.InfoContext(ctx, "serving", slog.String("addr", srv.Addr()), slog.String("data_dir", dir))
 
-	writeStats := func() error { return saveStats(dir, srv.Stats(), st.Stats(), redacted.Load()) }
+	sw := &statsWriter{dir: dir, srv: srv, st: st, redacted: &redacted}
+	if err := sw.write(true); err != nil {
+		return errors.Join(err, st.Close())
+	}
 
 	runCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
@@ -132,7 +174,7 @@ func (c *serveCmd) Run(ctx context.Context, globals *Globals) error {
 			case <-runCtx.Done():
 				return
 			case <-t.C:
-				if err := writeStats(); err != nil {
+				if err := sw.write(false); err != nil {
 					globals.Logger.WarnContext(runCtx, "failed to write stats", slog.Any("error", err))
 				}
 			}
@@ -144,11 +186,38 @@ func (c *serveCmd) Run(ctx context.Context, globals *Globals) error {
 	cancel()
 	wg.Wait()
 
-	return errors.Join(serveErr, st.Close(), writeStats())
+	return errors.Join(serveErr, st.Close(), sw.write(true))
 }
 
-func saveStats(dir string, rs receiver.Stats, ss store.Stats, redacted int64) (err error) {
-	data, err := json.Marshal(statsFile{
+// statsWriter skips unchanged stats so an idle daemon doesn't rewrite the file every tick.
+type statsWriter struct {
+	dir      string
+	srv      *receiver.Server
+	st       *store.Store
+	redacted *atomic.Int64
+	last     []byte
+}
+
+func (w *statsWriter) write(force bool) error {
+	sf := buildStats(w.srv.Stats(), w.st.Stats(), w.redacted.Load())
+	cmp, err := json.Marshal(sf)
+	if err != nil {
+		return fmt.Errorf("failed to encode stats: %w", err)
+	}
+	if !force && bytes.Equal(cmp, w.last) {
+		return nil
+	}
+	sf.UpdatedAt = time.Now().UTC()
+	if err := saveStats(w.dir, sf); err != nil {
+		return err
+	}
+	w.last = cmp
+
+	return nil
+}
+
+func buildStats(rs receiver.Stats, ss store.Stats, redacted int64) statsFile {
+	return statsFile{
 		Requests:        rs.Requests,
 		RecordsAccepted: rs.RecordsAccepted,
 		RecordsRejected: rs.RecordsRejected,
@@ -162,8 +231,16 @@ func saveStats(dir string, rs receiver.Stats, ss store.Stats, redacted int64) (e
 		FilesWritten:    ss.FilesWritten,
 		BytesWritten:    ss.BytesWritten,
 		Services:        ss.Services,
-		UpdatedAt:       time.Now().UTC(),
-	})
+		Compactions:     ss.Compactions,
+		FilesRetired:    ss.FilesRetired,
+		BytesOnDisk:     ss.BytesOnDisk,
+		PendingBatches:  ss.PendingBatches,
+		WriteErrors:     ss.WriteErrors,
+	}
+}
+
+func saveStats(dir string, sf statsFile) (err error) {
+	data, err := json.Marshal(sf)
 	if err != nil {
 		return fmt.Errorf("failed to encode stats: %w", err)
 	}

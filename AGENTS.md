@@ -53,7 +53,9 @@ The `cmd/quacktel` tests build and run the real binary. `examples/otel-go-app` i
 - Partitions use receive time, never record time, so skewed timestamps can't write into old partitions.
 - `service.name` is untrusted. It reaches the filesystem only as the slug and hash directory name, never as a path itself.
 - Every file is written to `.tmp`, fsynced, then renamed into place. Nothing is written in place, and that includes manifests.
-- Readers open only the files a manifest lists, never a glob. A file a manifest stops listing is unlinked only after the grace period.
+- Readers open only the files a manifest lists, through the `logs`/`spans` views, never a glob. A file a manifest stops listing is unlinked only after the grace period.
+- Startup deletes retired files and uncommitted merge outputs (`sealed-*`, `hour-*`); only unlisted `tail-*` files are reconciled into the manifest.
+- Parquet is written and merged outside the store lock.
 - The daemon never opens DuckDB. DuckDB is on the read path only, and it never installs or loads extensions at runtime.
 - Every reader connection applies the hardening settings in `DESIGN.md` and sets `lock_configuration = true` last. Scoped sessions restrict `allowed_directories` to that service's directory.
 - Raw SQL runs only after the prepared statement's type is confirmed as `SELECT`.

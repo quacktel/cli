@@ -77,7 +77,7 @@ quacktel version
                  │ services/<svc>/… Parquet + manifest.json (0700)
                  ▼
  quacktel mcp / quacktel query
-   read manifest → read_parquet([files]) in a locked-down DuckDB
+   manifests → logs/spans views over read_parquet([files]) in a locked-down DuckDB
 ```
 
 The daemon and the readers share nothing except the data directory. `mcp` works
@@ -142,19 +142,51 @@ as a path as-is:
 
 ### Write, seal, compact
 
-1. **Flush:** the in-memory Arrow builder is written to `.tmp/x.parquet`,
-   fsynced, then renamed into its partition.
-2. **Publish:** that service's new `manifest.json` is written to `.tmp` and
-   renamed over the old one. Readers use only the files in the manifest, never a glob, so
-   compaction can never produce duplicate or missing rows.
-3. **Compact:** tails are merged into a sealed file, the manifest is published
-   with the sealed file replacing its sources, and the sources are unlinked
-   after a grace period (default 60s) so in-flight queries can finish.
-4. **Shutdown:** on SIGTERM/SIGINT the buffer is flushed, the manifest
-   published, then the process exits.
+`Run` calls `Maintain` every `--flush-interval`. One pass runs, in order:
 
-The compaction targets (sealed every ~5 min, hourly after the hour closes,
-~128 MB row groups) are starting points to tune.
+1. **Flush.** Each non-empty builder is swapped into the service's pending
+   queue under the store lock. The lock is then released, and each pending batch
+   is written to `.tmp/x.parquet`, fsynced and renamed into the partition of its
+   **receive** time as `tail-<ulid>.parquet`. The lock is retaken to publish the
+   service's new `manifest.json` (written to `.tmp`, renamed over the old one).
+   Requests never wait on disk.
+2. **Retry.** A batch whose write fails stays pending and is retried next pass.
+   Files written but not published (a failed publish) stay in `unpublished` and
+   are listed by the next publish. Pending bytes count toward the buffer cap, so
+   a failing disk ends in `429`, and `write_errors` counts the failures.
+3. **Compaction**, every `--compact-interval` (default 5m):
+   - **Open hour:** once a partition holds `--seal-min-files` tails (default
+     10), they are merged into one `sealed-<ulid>.parquet`.
+   - **Closed hour:** once `hourEnd + 2×FlushInterval` has passed, every file in
+     the partition is merged into one `hour-<ulid>.parquet`, so late tails are
+     included.
+   - A merge streams the sources through a `pqarrow` writer with `WriteBuffered`
+     and 1M-row row groups, so memory stays flat. It runs outside the store lock.
+     The manifest is published with the merged file replacing its sources.
+     Sources whose schema metadata differs are skipped with a warning.
+4. **Retention**, in the same housekeeping step as compaction; see below.
+5. **Cleanup.** Files a manifest stops listing move to its `Retired` list with a
+   delete-after time (`--retire-grace`, default 60s) so in-flight queries can
+   finish. Cleanup unlinks the due ones, prunes empty hour and date
+   directories, republishes the manifest, and removes service directories with
+   nothing left and no records since startup.
+
+**Shutdown:** on SIGTERM/SIGINT the receiver drains, the buffer is flushed and
+the manifest published, then the process exits.
+
+**Startup:** `serve` deletes retired files and any unlisted `sealed-*`/`hour-*`
+files (see Storage above), and reconciles only unlisted `tail-*` files into the
+manifest.
+
+### Retention and size cap
+
+Housekeeping retires files whose hour partition ended more than `--retention`
+ago (default 720h). It then enforces `--max-disk` (default 10 GiB): while the
+listed bytes exceed the cap, the oldest whole (service, signal, hour) partition
+goes first. The open hour is never retired, so the cap can be exceeded by the
+open hour alone, which logs a warning. Retired files follow the same grace
+period as compaction. A service with no files and no activity since startup has
+its directory removed.
 
 ### Schema v1
 
@@ -203,6 +235,24 @@ values are stringified. Arrays and maps in attributes are JSON-encoded strings.
 record and left in `attrs`. Spans promote `session_id`, the HTTP keys and the `gen_ai` keys listed above, also copied. Any change to the promoted set bumps the schema version, recorded in Parquet
 key-value metadata and in the manifest. Readers union schema versions by column
 name (`union_by_name`).
+
+### `serve` flags
+
+| Flag | Default | Meaning |
+|---|---|---|
+| `--flush-interval` | `2s` | Maintenance pass interval; buffered records are written each pass. |
+| `--retention` | `720h` | Delete whole hour partitions older than this. |
+| `--max-disk` | `10737418240` | Parquet bytes cap; oldest closed hours are deleted first. |
+| `--compact-interval` | `5m` | How often compaction and retention run. |
+| `--seal-min-files` | `10` | Open-hour tails that trigger a seal. At least 2. |
+| `--retire-grace` | `60s` | How long retired files stay on disk for running queries. |
+
+`serve` rejects a non-positive value, or `--seal-min-files` below 2, before it
+opens the store or listens.
+
+`stats.json` also carries `compactions`, `files_retired`, `bytes_on_disk`,
+`pending_batches` and `write_errors`. It is rewritten only when a counter
+changes (never for `updated_at` alone), once at startup and once at shutdown.
 
 ## Receiver hardening
 
@@ -267,8 +317,14 @@ SET threads = 2;
 SET lock_configuration = true;
 ```
 
-Views over the current files in the manifests are created **before** locking.
-Each query refreshes them when a manifest generation has changed.
+The `logs` and `spans` views list exactly the files in the manifests and are
+created **before** locking. Each query refreshes them when a manifest has
+changed. A signal with no files gets a typed empty view, so queries against it
+still work.
+
+**Globbing Parquet is unsupported.** `read_parquet('…/*.parquet')` sees files a
+manifest has retired or not yet published, and compaction makes it return
+duplicate rows. Query `FROM logs` or `FROM spans`.
 
 **Scoped sessions.** `quacktel mcp --service <name>` (and `query --service`)
 resolve the name to `<svc-dir>` and set `allowed_directories` to that directory
@@ -379,6 +435,7 @@ monitoring docs in M1.)
 
 ```sh
 OTEL_EXPORTER_OTLP_ENDPOINT=http://127.0.0.1:4318 go run -C examples/otel-go-app .
+quacktel query "SELECT name, kind, duration_ns FROM spans ORDER BY start_time"
 ```
 
 ### OpenShell
@@ -406,7 +463,7 @@ headers_file = "<data-dir>/otlp-headers"
 SELECT json_extract_string(body, '$.action') AS action,
        json_extract_string(body, '$.dst_endpoint.hostname') AS host,
        attrs['openshell.sandbox.id'] AS sandbox
-FROM read_parquet('<data-dir>/services/*/logs/**/*.parquet')
+FROM logs
 WHERE attrs['ocsf.class_uid'] = '4001';
 ```
 
@@ -480,11 +537,21 @@ Not reused: Substrait, Participle SQL, and the custom executor.
 | M0 | Repo scaffold, Kong CLI skeleton, CI (lint + test on macOS arm64), DuckDB static-link spike | `go install ./cmd/quacktel` on a Mac gives a binary that runs `SELECT 42` through DuckDB, with no runtime extension downloads; hardening settings verified by tests. |
 | M1 | Receiver + redaction + logs writer + per-service layout + manifest | Claude Code logs land in Parquet; hostile `service.name` values (traversal, unicode, overflow past the cap) are handled; the hardening tests pass (Origin, Host, Content-Type, caps, 429). |
 | M2 (done) | Spans writer | A Go/Node sample app's traces land and can be queried. |
-| M3 | Compaction + retention (including removal of expired service directories) + size cap | A 24h soak shows a bounded file count, no duplicate rows, and the cap enforced. |
+| M3 (done) | Compaction + retention (including removal of expired service directories) + size cap | A 24h soak shows a bounded file count, no duplicate rows, and the cap enforced. |
 | M4 | `engine`, `tools`, `mcp`, `query` | All six tools work against fixtures; the SELECT guard rejects the bypass corpus; a scoped session can't read another service's files through `sql`/`read_parquet`. |
 | M5 | `service` (launchd), `doctor`, `env` | Install, reboot, data still flowing, on macOS. |
 | M6 | Pre-1.0 release: goreleaser, GitHub attestations, SBOM, Homebrew tap, `install.sh` | A release binary, installed via the tap formula and via `install.sh` on a clean Mac, runs with no Gatekeeper prompt and passes `gh attestation verify`. Decide on notarisation. |
 | M7 | Linux amd64/arm64: XDG paths, systemd user unit, .deb/.rpm, `install.sh` Linux support | Native builds on the oldest supported glibc; install, reboot, data still flowing, on Ubuntu and Fedora. |
+
+### Manual soak
+
+M3 exit check, run by hand: run `quacktel serve` for 24h with Claude Code
+telemetry pointed at it, then check:
+
+- `stats.json`: `compactions` and `files_retired` are growing, `bytes_on_disk`
+  is under the cap, and `write_errors` is 0.
+- Each closed hour holds exactly one file per (service, signal).
+- `SELECT count(*) FROM logs` is the same before and after a `serve` restart.
 
 ## Risks and open questions
 
@@ -511,9 +578,17 @@ Not reused: Substrait, Participle SQL, and the custom executor.
   Linux builds and the choice of oldest supported glibc. M0 de-risks the macOS
   path before any feature work.
 - **Binary size** is 121 MB unstripped and 90 MB with `-ldflags='-s -w'` (darwin/arm64, measured in M1; M0 was 79 MB and 62 MB); acceptable.
-- **Flush swaps buffers and writes outside the store lock** (M3), so requests
-  don't wait on disk. A failed write keeps the batch pending and retries next
-  pass; pending bytes count toward the buffer cap, so a failing disk ends in 429.
+- **The open hour holds up to `2×SealMinFiles+1` files per (service, signal)**,
+  because sealed files accumulate until the hour closes and only tails are
+  sealed. Queries over it open more files than a closed hour.
+- **A merge reads and rewrites a whole closed hour**, so I/O spikes at each hour
+  boundary for busy services, and a merge that fails is retried every
+  housekeeping pass.
+- **Skipped merges stay skipped:** partitions whose files have different schema
+  metadata are never compacted, and are only logged.
+- **The disk cap ignores the open hour and `.tmp`**, so `bytes_on_disk` can
+  exceed `--max-disk` until the hour closes.
+- **A query racing retirement** can fail if it outlives `--retire-grace`.
 - **Stringified attribute values** lose types (numeric comparisons need a
   `CAST`). Typed tools hide this; the `sql` tool docs must mention it.
 - **The span promoted-key set** was chosen in M2 from the OpenTelemetry HTTP and GenAI conventions, not from real samples. Revisit it against real agent traces; a change bumps the schema version.
