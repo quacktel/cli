@@ -15,15 +15,18 @@ import (
 	"github.com/stretchr/testify/require"
 	"go.opentelemetry.io/collector/pdata/plog"
 	"go.opentelemetry.io/collector/pdata/plog/plogotlp"
+	"go.opentelemetry.io/collector/pdata/ptrace"
+	"go.opentelemetry.io/collector/pdata/ptrace/ptraceotlp"
 
 	"github.com/quacktel/cli/internal/receiver"
 )
 
 type fixture struct {
-	srv  *receiver.Server
-	mu   sync.Mutex
-	got  []plog.Logs
-	sink receiver.Sink
+	srv   *receiver.Server
+	mu    sync.Mutex
+	got   []plog.Logs
+	spans []ptrace.Traces
+	sink  receiver.LogsSink
 }
 
 func (f *fixture) calls() []plog.Logs {
@@ -32,12 +35,18 @@ func (f *fixture) calls() []plog.Logs {
 	return f.got
 }
 
-func start(t *testing.T, maxBody int64, sink receiver.Sink) *fixture {
+func (f *fixture) traceCalls() []ptrace.Traces {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.spans
+}
+
+func start(t *testing.T, maxBody int64, sink receiver.LogsSink) *fixture {
 	t.Helper()
 	return startWith(t, receiver.Options{Addr: "127.0.0.1:0", MaxBody: maxBody}, sink)
 }
 
-func startWith(t *testing.T, opts receiver.Options, sink receiver.Sink) *fixture {
+func startWith(t *testing.T, opts receiver.Options, sink receiver.LogsSink) *fixture {
 	t.Helper()
 	f := &fixture{}
 	f.sink = func(ctx context.Context, logs plog.Logs) (int64, string, error) {
@@ -49,7 +58,27 @@ func startWith(t *testing.T, opts receiver.Options, sink receiver.Sink) *fixture
 		}
 		return 0, "", nil
 	}
-	srv, err := receiver.New(opts, f.sink)
+	return f.launch(t, opts, receiver.Sinks{Logs: f.sink})
+}
+
+// startTraces serves only the traces route.
+func startTraces(t *testing.T, opts receiver.Options, sink receiver.TracesSink) *fixture {
+	t.Helper()
+	f := &fixture{}
+	return f.launch(t, opts, receiver.Sinks{Traces: func(ctx context.Context, td ptrace.Traces) (int64, string, error) {
+		f.mu.Lock()
+		f.spans = append(f.spans, td)
+		f.mu.Unlock()
+		if sink != nil {
+			return sink(ctx, td)
+		}
+		return 0, "", nil
+	}})
+}
+
+func (f *fixture) launch(t *testing.T, opts receiver.Options, sinks receiver.Sinks) *fixture {
+	t.Helper()
+	srv, err := receiver.New(opts, sinks)
 	require.NoError(t, err)
 	f.srv = srv
 	ctx, cancel := context.WithCancel(t.Context())
@@ -309,14 +338,14 @@ func TestMetricsDropped(t *testing.T) {
 }
 
 func TestBind(t *testing.T) {
-	sink := func(context.Context, plog.Logs) (int64, string, error) { return 0, "", nil }
+	sinks := receiver.Sinks{Logs: func(context.Context, plog.Logs) (int64, string, error) { return 0, "", nil }}
 
 	for _, addr := range []string{"0.0.0.0:0", "example.com:4318", ":0"} {
-		_, err := receiver.New(receiver.Options{Addr: addr}, sink)
+		_, err := receiver.New(receiver.Options{Addr: addr}, sinks)
 		require.Error(t, err, addr)
 	}
 
-	s, err := receiver.New(receiver.Options{Addr: "0.0.0.0:0", UnsafeBind: true}, sink)
+	s, err := receiver.New(receiver.Options{Addr: "0.0.0.0:0", UnsafeBind: true}, sinks)
 	require.NoError(t, err)
 	_, p, err := net.SplitHostPort(s.Addr())
 	require.NoError(t, err)
@@ -325,7 +354,7 @@ func TestBind(t *testing.T) {
 	cancel()
 	require.NoError(t, s.Serve(ctx))
 
-	s, err = receiver.New(receiver.Options{Addr: "localhost:0"}, sink)
+	s, err = receiver.New(receiver.Options{Addr: "localhost:0"}, sinks)
 	require.NoError(t, err)
 	require.True(t, strings.HasPrefix(s.Addr(), "127.0.0.1:") || strings.HasPrefix(s.Addr(), "[::1]:"))
 	require.NoError(t, s.Serve(ctx))
@@ -346,8 +375,8 @@ func TestUnsafeBindHost(t *testing.T) {
 	}
 
 	for _, unsafe := range []bool{true, false} {
-		sink := func(context.Context, plog.Logs) (int64, string, error) { return 0, "", nil }
-		srv, err := receiver.New(receiver.Options{Addr: net.JoinHostPort(host, "0"), UnsafeBind: unsafe}, sink)
+		sinks := receiver.Sinks{Logs: func(context.Context, plog.Logs) (int64, string, error) { return 0, "", nil }}
+		srv, err := receiver.New(receiver.Options{Addr: net.JoinHostPort(host, "0"), UnsafeBind: unsafe}, sinks)
 		require.NoError(t, err)
 		f := &fixture{srv: srv}
 		ctx, cancel := context.WithCancel(t.Context())
@@ -399,4 +428,163 @@ func TestNoTokenIgnoresAuthorization(t *testing.T) {
 	f := start(t, 0, nil)
 	require.Equal(t, http.StatusOK, f.do(t, req{auth: []string{"Bearer anything"}, body: sampleProto(t, 1)}).StatusCode)
 	require.Zero(t, f.srv.Stats().Unauthorized)
+}
+
+func tracesProto(t *testing.T, n int) []byte {
+	t.Helper()
+	req := ptraceotlp.NewExportRequest()
+	spans := req.Traces().ResourceSpans().AppendEmpty().ScopeSpans().AppendEmpty().Spans()
+	for range n {
+		spans.AppendEmpty().SetName("op")
+	}
+	b, err := req.MarshalProto()
+	require.NoError(t, err)
+	return b
+}
+
+func TestTracesGates(t *testing.T) {
+	const token = "0123456789abcdef"
+	f := startTraces(t, receiver.Options{Addr: "127.0.0.1:0", Token: token, MaxBody: 1024}, nil)
+	p := port(f)
+	body := tracesProto(t, 1)
+	auth := []string{"Bearer " + token}
+	tests := []struct {
+		name string
+		req  req
+		want int
+	}{
+		{"origin", req{path: "/v1/traces", auth: auth, origin: "http://evil.example", body: body}, http.StatusForbidden},
+		{"wrong host", req{path: "/v1/traces", auth: auth, host: "evil.example:" + p, body: body}, http.StatusForbidden},
+		{"missing token", req{path: "/v1/traces", body: body}, http.StatusUnauthorized},
+		{"text/plain", req{path: "/v1/traces", auth: auth, ctype: "text/plain", body: body}, http.StatusUnsupportedMediaType},
+		{"oversized", req{path: "/v1/traces", auth: auth, body: bytes.Repeat([]byte{0}, 64<<10)}, http.StatusRequestEntityTooLarge},
+		{"malformed", req{path: "/v1/traces", auth: auth, body: []byte{0xff, 0xff, 0xff}}, http.StatusBadRequest},
+		{"logs route absent", req{path: "/v1/logs", auth: auth, body: body}, http.StatusNotFound},
+		{"ok", req{path: "/v1/traces", auth: auth, body: body}, http.StatusOK},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			require.Equal(t, tt.want, f.do(t, tt.req).StatusCode)
+		})
+	}
+	require.Len(t, f.traceCalls(), 1)
+	require.EqualValues(t, 1, f.srv.Stats().SpansAccepted)
+}
+
+func TestTracesNilSink(t *testing.T) {
+	f := start(t, 0, nil)
+	require.Equal(t, http.StatusNotFound, f.do(t, req{path: "/v1/traces", body: tracesProto(t, 1)}).StatusCode)
+	require.Empty(t, f.traceCalls())
+}
+
+func TestTracesJSONDecoding(t *testing.T) {
+	f := startTraces(t, receiver.Options{Addr: "127.0.0.1:0"}, nil)
+	body := `{"resourceSpans":[{"resource":{"attributes":[{"key":"service.name","value":{"stringValue":"svc"}}]},
+	"scopeSpans":[{"spans":[{"traceId":"5b8efff798038103d269b633813fc60c","spanId":"eee19b7ec3c1b174",
+	"parentSpanId":"0102030405060708","name":"GET /","kind":2,"status":{"code":2,"message":"boom"}}]}]}]}`
+	resp := f.do(t, req{path: "/v1/traces", ctype: "application/json", body: []byte(body)})
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+	require.Equal(t, "application/json", resp.Header.Get("Content-Type"))
+	require.NoError(t, ptraceotlp.NewExportResponse().UnmarshalJSON(resp.Body))
+
+	calls := f.traceCalls()
+	require.Len(t, calls, 1)
+	rs := calls[0].ResourceSpans().At(0)
+	svc, ok := rs.Resource().Attributes().Get("service.name")
+	require.True(t, ok)
+	require.Equal(t, "svc", svc.Str())
+	sp := rs.ScopeSpans().At(0).Spans().At(0)
+	require.Equal(t, "5b8efff798038103d269b633813fc60c", sp.TraceID().String())
+	require.Equal(t, "eee19b7ec3c1b174", sp.SpanID().String())
+	require.Equal(t, "0102030405060708", sp.ParentSpanID().String())
+	require.Equal(t, ptrace.SpanKindServer, sp.Kind())
+	require.Equal(t, ptrace.StatusCodeError, sp.Status().Code())
+	require.Equal(t, "boom", sp.Status().Message())
+}
+
+func TestTracesResponseEncoding(t *testing.T) {
+	f := startTraces(t, receiver.Options{Addr: "127.0.0.1:0"}, nil)
+	resp := f.do(t, req{path: "/v1/traces", body: tracesProto(t, 1)})
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+	require.Equal(t, "application/x-protobuf", resp.Header.Get("Content-Type"))
+	require.NoError(t, ptraceotlp.NewExportResponse().UnmarshalProto(resp.Body))
+
+	resp = f.do(t, req{path: "/v1/traces", ctype: "application/json", body: []byte("{}")})
+	require.Equal(t, "application/json", resp.Header.Get("Content-Type"))
+	require.NoError(t, ptraceotlp.NewExportResponse().UnmarshalJSON(resp.Body))
+}
+
+func TestTracesSinkOutcomes(t *testing.T) {
+	t.Run("full", func(t *testing.T) {
+		f := startTraces(t, receiver.Options{Addr: "127.0.0.1:0"}, func(context.Context, ptrace.Traces) (int64, string, error) {
+			return 0, "", fmt.Errorf("wrapped: %w", receiver.ErrFull)
+		})
+		resp := f.do(t, req{path: "/v1/traces", body: tracesProto(t, 1)})
+		require.Equal(t, http.StatusTooManyRequests, resp.StatusCode)
+		require.Equal(t, "1", resp.Header.Get("Retry-After"))
+	})
+	t.Run("error", func(t *testing.T) {
+		f := startTraces(t, receiver.Options{Addr: "127.0.0.1:0"}, func(context.Context, ptrace.Traces) (int64, string, error) {
+			return 0, "", io.ErrUnexpectedEOF
+		})
+		require.Equal(t, http.StatusServiceUnavailable, f.do(t, req{path: "/v1/traces", body: tracesProto(t, 1)}).StatusCode)
+	})
+	t.Run("partial", func(t *testing.T) {
+		f := startTraces(t, receiver.Options{Addr: "127.0.0.1:0"}, func(context.Context, ptrace.Traces) (int64, string, error) {
+			return 2, "bad spans", nil
+		})
+		resp := f.do(t, req{path: "/v1/traces", body: tracesProto(t, 5)})
+		require.Equal(t, http.StatusOK, resp.StatusCode)
+		out := ptraceotlp.NewExportResponse()
+		require.NoError(t, out.UnmarshalProto(resp.Body))
+		require.EqualValues(t, 2, out.PartialSuccess().RejectedSpans())
+		require.Equal(t, "bad spans", out.PartialSuccess().ErrorMessage())
+		st := f.srv.Stats()
+		require.EqualValues(t, 3, st.SpansAccepted)
+		require.EqualValues(t, 2, st.SpansRejected)
+		require.Zero(t, st.RecordsAccepted)
+	})
+}
+
+func TestTracesInFlightCap(t *testing.T) {
+	arrived := make(chan struct{}, 2)
+	release := make(chan struct{})
+	f := startTraces(t, receiver.Options{Addr: "127.0.0.1:0", MaxInFlight: 2}, func(context.Context, ptrace.Traces) (int64, string, error) {
+		arrived <- struct{}{}
+		<-release
+		return 0, "", nil
+	})
+
+	body := tracesProto(t, 1)
+	statuses := make(chan int, 2)
+	errs := make(chan error, 2)
+	for range 2 {
+		go func() {
+			hr, err := http.NewRequestWithContext(t.Context(), http.MethodPost, "http://"+f.srv.Addr()+"/v1/traces", bytes.NewReader(body))
+			if err != nil {
+				errs <- err
+				return
+			}
+			hr.Header.Set("Content-Type", "application/x-protobuf")
+			resp, err := http.DefaultClient.Do(hr)
+			if err != nil {
+				errs <- err
+				return
+			}
+			statuses <- resp.StatusCode
+			errs <- resp.Body.Close()
+		}()
+	}
+	<-arrived
+	<-arrived
+
+	resp := f.do(t, req{path: "/v1/traces", body: body})
+	require.Equal(t, http.StatusTooManyRequests, resp.StatusCode)
+	require.Equal(t, "1", resp.Header.Get("Retry-After"))
+
+	close(release)
+	for range 2 {
+		require.Equal(t, http.StatusOK, <-statuses)
+		require.NoError(t, <-errs)
+	}
 }

@@ -17,6 +17,8 @@ import (
 
 	"go.opentelemetry.io/collector/pdata/plog"
 	"go.opentelemetry.io/collector/pdata/plog/plogotlp"
+	"go.opentelemetry.io/collector/pdata/ptrace"
+	"go.opentelemetry.io/collector/pdata/ptrace/ptraceotlp"
 )
 
 const (
@@ -31,8 +33,29 @@ const (
 // ErrFull is wrapped by a sink to signal backpressure.
 var ErrFull = errors.New("buffer full")
 
-// Sink stores a decoded batch and reports how many records it rejected.
-type Sink func(ctx context.Context, logs plog.Logs) (rejected int64, msg string, err error)
+// LogsSink stores a decoded batch and reports how many records it rejected.
+type LogsSink func(ctx context.Context, ld plog.Logs) (rejected int64, msg string, err error)
+
+// TracesSink stores a decoded batch and reports how many spans it rejected.
+type TracesSink func(ctx context.Context, td ptrace.Traces) (rejected int64, msg string, err error)
+
+// Sinks holds one sink per signal; a nil sink makes that signal's route return 404.
+type Sinks struct {
+	Logs   LogsSink
+	Traces TracesSink
+}
+
+// codec is the decode surface shared by the OTLP export requests.
+type codec interface {
+	UnmarshalJSON([]byte) error
+	UnmarshalProto([]byte) error
+}
+
+// encoder is the encode surface shared by the OTLP export responses.
+type encoder interface {
+	MarshalJSON() ([]byte, error)
+	MarshalProto() ([]byte, error)
+}
 
 type Options struct {
 	Addr        string
@@ -47,6 +70,8 @@ type Stats struct {
 	Requests        int64
 	RecordsAccepted int64
 	RecordsRejected int64
+	SpansAccepted   int64
+	SpansRejected   int64
 	Responses429    int64
 	MetricsDropped  int64
 	Unauthorized    int64
@@ -55,18 +80,18 @@ type Stats struct {
 type Server struct {
 	srv     *http.Server
 	ln      net.Listener
-	sink    Sink
+	sinks   Sinks
 	log     *slog.Logger
 	maxBody int64
 	slots   chan struct{}
 	hosts   map[string]struct{}
 	auth    []byte
 
-	requests, accepted, rejected, full, metrics, unauthorized atomic.Int64
+	requests, accepted, rejected, spansAccepted, spansRejected, full, metrics, unauthorized atomic.Int64
 }
 
 // New validates the bind address and binds the listener, so a bad address fails before serving.
-func New(opts Options, sink Sink) (*Server, error) {
+func New(opts Options, sinks Sinks) (*Server, error) {
 	if opts.Addr == "" {
 		opts.Addr = DefaultAddr
 	}
@@ -93,7 +118,7 @@ func New(opts Options, sink Sink) (*Server, error) {
 	_, port, _ := net.SplitHostPort(ln.Addr().String())
 	s := &Server{
 		ln:      ln,
-		sink:    sink,
+		sinks:   sinks,
 		log:     opts.Logger,
 		maxBody: opts.MaxBody,
 		slots:   make(chan struct{}, opts.MaxInFlight),
@@ -151,6 +176,8 @@ func (s *Server) Stats() Stats {
 		Requests:        s.requests.Load(),
 		RecordsAccepted: s.accepted.Load(),
 		RecordsRejected: s.rejected.Load(),
+		SpansAccepted:   s.spansAccepted.Load(),
+		SpansRejected:   s.spansRejected.Load(),
 		Responses429:    s.full.Load(),
 		MetricsDropped:  s.metrics.Load(),
 		Unauthorized:    s.unauthorized.Load(),
@@ -159,7 +186,7 @@ func (s *Server) Stats() Stats {
 
 func (s *Server) handle(w http.ResponseWriter, r *http.Request) {
 	s.requests.Add(1)
-	if r.URL.Path != "/v1/logs" && r.URL.Path != "/v1/metrics" {
+	if !s.routed(r.URL.Path) {
 		http.NotFound(w, r)
 		return
 	}
@@ -201,16 +228,32 @@ func (s *Server) handle(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), status)
 		return
 	}
-	if r.URL.Path == "/v1/metrics" {
+	switch r.URL.Path {
+	case "/v1/metrics":
 		s.metrics.Add(1)
 		s.respond(w, mt, plogotlp.NewExportResponse())
-		return
+	case "/v1/logs":
+		s.logs(w, r, mt, body)
+	default:
+		s.traces(w, r, mt, body)
 	}
-	s.logs(w, r, mt, body)
 }
 
-func (s *Server) logs(w http.ResponseWriter, r *http.Request, mt string, body []byte) {
-	req := plogotlp.NewExportRequest()
+func (s *Server) routed(p string) bool {
+	switch p {
+	case "/v1/metrics":
+		return true
+	case "/v1/logs":
+		return s.sinks.Logs != nil
+	case "/v1/traces":
+		return s.sinks.Traces != nil
+	default:
+		return false
+	}
+}
+
+// decode answers 400 itself on failure so callers only handle success.
+func decode(w http.ResponseWriter, mt string, body []byte, req codec) bool {
 	var err error
 	if mt == mimeJSON {
 		err = req.UnmarshalJSON(body)
@@ -219,20 +262,36 @@ func (s *Server) logs(w http.ResponseWriter, r *http.Request, mt string, body []
 	}
 	if err != nil {
 		http.Error(w, "malformed request", http.StatusBadRequest)
+		return false
+	}
+	return true
+}
+
+// sinkFailed answers 429 or 503 itself and reports whether the sink failed.
+func (s *Server) sinkFailed(w http.ResponseWriter, r *http.Request, err error, what string) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, ErrFull) {
+		s.full.Add(1)
+		w.Header().Set("Retry-After", "1")
+		http.Error(w, "buffer full", http.StatusTooManyRequests)
+		return true
+	}
+	s.log.ErrorContext(r.Context(), "failed to store "+what, "error", err)
+	http.Error(w, "unavailable", http.StatusServiceUnavailable)
+	return true
+}
+
+func (s *Server) logs(w http.ResponseWriter, r *http.Request, mt string, body []byte) {
+	req := plogotlp.NewExportRequest()
+	if !decode(w, mt, body, req) {
 		return
 	}
 	logs := req.Logs()
 	total := int64(logs.LogRecordCount())
-	rejected, msg, err := s.sink(r.Context(), logs)
-	if err != nil {
-		if errors.Is(err, ErrFull) {
-			s.full.Add(1)
-			w.Header().Set("Retry-After", "1")
-			http.Error(w, "buffer full", http.StatusTooManyRequests)
-			return
-		}
-		s.log.ErrorContext(r.Context(), "failed to store logs", "error", err)
-		http.Error(w, "unavailable", http.StatusServiceUnavailable)
+	rejected, msg, err := s.sinks.Logs(r.Context(), logs)
+	if s.sinkFailed(w, r, err, "logs") {
 		return
 	}
 	s.accepted.Add(total - rejected)
@@ -245,7 +304,28 @@ func (s *Server) logs(w http.ResponseWriter, r *http.Request, mt string, body []
 	s.respond(w, mt, resp)
 }
 
-func (s *Server) respond(w http.ResponseWriter, mt string, resp plogotlp.ExportResponse) {
+func (s *Server) traces(w http.ResponseWriter, r *http.Request, mt string, body []byte) {
+	req := ptraceotlp.NewExportRequest()
+	if !decode(w, mt, body, req) {
+		return
+	}
+	td := req.Traces()
+	total := int64(td.SpanCount())
+	rejected, msg, err := s.sinks.Traces(r.Context(), td)
+	if s.sinkFailed(w, r, err, "traces") {
+		return
+	}
+	s.spansAccepted.Add(total - rejected)
+	s.spansRejected.Add(rejected)
+	resp := ptraceotlp.NewExportResponse()
+	if rejected > 0 {
+		resp.PartialSuccess().SetRejectedSpans(rejected)
+		resp.PartialSuccess().SetErrorMessage(msg)
+	}
+	s.respond(w, mt, resp)
+}
+
+func (s *Server) respond(w http.ResponseWriter, mt string, resp encoder) {
 	var out []byte
 	var err error
 	if mt == mimeJSON {

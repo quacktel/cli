@@ -4,7 +4,9 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/require"
+	"go.opentelemetry.io/collector/pdata/pcommon"
 	"go.opentelemetry.io/collector/pdata/plog"
+	"go.opentelemetry.io/collector/pdata/ptrace"
 
 	"github.com/quacktel/cli/internal/redact"
 )
@@ -80,4 +82,40 @@ func TestLogs(t *testing.T) {
 	require.Equal(t, "[REDACTED]", el.Str())
 	require.Equal(t, "plain", v.Slice().At(1).Str())
 	require.Equal(t, "password=hunter2", lr.Body().Str())
+}
+
+func TestTraces(t *testing.T) {
+	td := ptrace.NewTraces()
+	rs := td.ResourceSpans().AppendEmpty()
+	rs.Resource().Attributes().PutStr("auth_token", "r")
+	ss := rs.ScopeSpans().AppendEmpty()
+	ss.Scope().Attributes().PutStr("auth_token", "s")
+	sp := ss.Spans().AppendEmpty()
+	sp.SetName("password=hunter2")
+	sp.Status().SetMessage("token=abc")
+	a := sp.Attributes()
+	a.PutStr("auth_token", "a")
+	a.PutInt("gen_ai.usage.input_tokens", 42)
+	a.PutInt("http.response.status_code", 200)
+	a.PutEmptyMap("outer").PutStr("auth_token", "n")
+	ev := sp.Events().AppendEmpty()
+	ev.Attributes().PutStr("auth_token", "e")
+	ln := sp.Links().AppendEmpty()
+	ln.Attributes().PutStr("auth_token", "l")
+
+	require.Equal(t, 6, redact.Default().Traces(td))
+
+	for _, m := range []pcommon.Map{rs.Resource().Attributes(), ss.Scope().Attributes(), a, ev.Attributes(), ln.Attributes()} {
+		v, _ := m.Get("auth_token")
+		require.Equal(t, "[REDACTED]", v.Str())
+	}
+	v, _ := a.Get("outer")
+	inner, _ := v.Map().Get("auth_token")
+	require.Equal(t, "[REDACTED]", inner.Str())
+	v, _ = a.Get("gen_ai.usage.input_tokens")
+	require.EqualValues(t, 42, v.Int())
+	v, _ = a.Get("http.response.status_code")
+	require.EqualValues(t, 200, v.Int())
+	require.Equal(t, "token=abc", sp.Status().Message())
+	require.Equal(t, "password=hunter2", sp.Name())
 }

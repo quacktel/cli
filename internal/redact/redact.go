@@ -6,6 +6,7 @@ import (
 
 	"go.opentelemetry.io/collector/pdata/pcommon"
 	"go.opentelemetry.io/collector/pdata/plog"
+	"go.opentelemetry.io/collector/pdata/ptrace"
 )
 
 const placeholder = "[REDACTED]"
@@ -36,6 +37,27 @@ func (r *Redactor) Logs(ld plog.Logs) int {
 			n += r.attrs(sl.Scope().Attributes())
 			for _, lr := range sl.LogRecords().All() {
 				n += r.attrs(lr.Attributes())
+			}
+		}
+	}
+	return n
+}
+
+// Traces masks matching attribute values in place and returns how many it masked.
+func (r *Redactor) Traces(td ptrace.Traces) int {
+	n := 0
+	for _, rs := range td.ResourceSpans().All() {
+		n += r.attrs(rs.Resource().Attributes())
+		for _, ss := range rs.ScopeSpans().All() {
+			n += r.attrs(ss.Scope().Attributes())
+			for _, sp := range ss.Spans().All() {
+				n += r.attrs(sp.Attributes())
+				for _, ev := range sp.Events().All() {
+					n += r.attrs(ev.Attributes())
+				}
+				for _, l := range sp.Links().All() {
+					n += r.attrs(l.Attributes())
+				}
 			}
 		}
 	}

@@ -99,7 +99,7 @@ func (c *serveCmd) Run(ctx context.Context, globals *Globals) error {
 		MaxInFlight: c.MaxInFlight,
 		Token:       token,
 		Logger:      globals.Logger,
-	}, sink)
+	}, receiver.Sinks{Logs: sink})
 	if err != nil {
 		return errors.Join(fmt.Errorf("failed to start receiver: %w", err), st.Close())
 	}
