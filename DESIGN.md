@@ -502,7 +502,7 @@ It never mutates state; the flock probe releases immediately. Checks, in order:
 
 ## Onboarding
 
-`quacktel env [--listen] [--claude-code] [--auth] [--data-dir] [--mcp] [--service]`
+`quacktel env [--listen] [--claude-code] [--auth] [--data-dir] [--json | --mcp] [--service]`
 prints shell exports to stdout, one per line. The endpoint comes from `--listen`
 (default `127.0.0.1:4318`):
 
@@ -520,6 +520,9 @@ export OTEL_METRICS_EXPORTER=none
   `doctor`, it uses the installed agent's recorded `--data-dir` unless
   `--data-dir` is given. It fails if the file doesn't exist; run
   `quacktel serve --auth` first.
+- `--json` prints the same variables as `{"env": {...}}`, the shape of
+  `~/.claude/settings.json`, with the header value unquoted. It can't be
+  combined with `--mcp`.
 - `--mcp` prints only an MCP server config, pretty-printed, with the absolute
   path of the running binary (symlinks resolved). `--service X` adds
   `"--service", "X"` to the args:

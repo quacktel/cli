@@ -92,9 +92,17 @@ export OTEL_EXPORTER_OTLP_HEADERS='authorization=Bearer <token>'
 ```
 
 For one shell, run `eval "$(quacktel env --claude-code --auth)"` before starting
-`claude`. To make it permanent, put the same variables in the `env` block of
-`~/.claude/settings.json`. The token is a local secret, so keep that file
-private.
+`claude`. To make it permanent, add the variables to the `env` block of
+`~/.claude/settings.json`. `--json` prints them in that shape, and `jq` merges
+them into your existing settings while keeping other keys:
+
+```sh
+quacktel env --claude-code --auth --json
+jq -s '.[0] * .[1]' ~/.claude/settings.json <(quacktel env --claude-code --auth --json) \
+  > /tmp/settings.json && mv /tmp/settings.json ~/.claude/settings.json
+```
+
+The token is a local secret, so keep `settings.json` private.
 
 Claude Code sends its usage data (cost, tokens, tool results, prompts if you
 enable `OTEL_LOG_USER_PROMPTS`) as log events. You'll find them in `logs`, with

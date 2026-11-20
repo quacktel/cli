@@ -22,7 +22,8 @@ type envCmd struct {
 	ClaudeCode bool   `name:"claude-code" help:"Also enable Claude Code telemetry."`
 	Auth       bool   `help:"Also export the bearer token from <data-dir>/otlp-headers."`
 	DataDir    string `help:"Data directory. Defaults to the per-user config dir." type:"path"`
-	MCP        bool   `name:"mcp" help:"Print only an MCP server config for quacktel mcp, as JSON."`
+	JSON       bool   `name:"json" help:"Print the variables as a JSON env object, the shape of ~/.claude/settings.json." xor:"format"`
+	MCP        bool   `name:"mcp" help:"Print only an MCP server config for quacktel mcp, as JSON." xor:"format"`
 	Service    string `help:"With --mcp, restrict the MCP server to one service's data."`
 }
 
@@ -31,22 +32,42 @@ func (c *envCmd) Run(w io.Writer, kctx *kong.Context) error {
 		return c.printMCP(w)
 	}
 
-	lines := []string{
-		"export OTEL_EXPORTER_OTLP_ENDPOINT=http://" + c.Listen,
-		"export OTEL_EXPORTER_OTLP_PROTOCOL=http/protobuf",
-		"export OTEL_LOGS_EXPORTER=otlp",
-		"export OTEL_TRACES_EXPORTER=otlp",
-		"export OTEL_METRICS_EXPORTER=none",
+	vars := [][2]string{
+		{"OTEL_EXPORTER_OTLP_ENDPOINT", "http://" + c.Listen},
+		{"OTEL_EXPORTER_OTLP_PROTOCOL", "http/protobuf"},
+		{"OTEL_LOGS_EXPORTER", "otlp"},
+		{"OTEL_TRACES_EXPORTER", "otlp"},
+		{"OTEL_METRICS_EXPORTER", "none"},
 	}
 	if c.ClaudeCode {
-		lines = append(lines, "export CLAUDE_CODE_ENABLE_TELEMETRY=1")
+		vars = append(vars, [2]string{"CLAUDE_CODE_ENABLE_TELEMETRY", "1"})
 	}
 	if c.Auth {
 		header, err := c.authHeader(kctx)
 		if err != nil {
 			return err
 		}
-		lines = append(lines, "export OTEL_EXPORTER_OTLP_HEADERS='"+header+"'")
+		vars = append(vars, [2]string{"OTEL_EXPORTER_OTLP_HEADERS", header})
+	}
+	if c.JSON {
+		env := make(map[string]string, len(vars))
+		for _, v := range vars {
+			env[v[0]] = v[1]
+		}
+		enc := json.NewEncoder(w)
+		enc.SetIndent("", "  ")
+
+		return enc.Encode(map[string]map[string]string{"env": env})
+	}
+
+	lines := make([]string, len(vars))
+	for i, v := range vars {
+		val := v[1]
+		// The header value contains a space, so the shell needs it quoted.
+		if strings.ContainsAny(val, " ") {
+			val = "'" + val + "'"
+		}
+		lines[i] = "export " + v[0] + "=" + val
 	}
 	_, err := fmt.Fprintln(w, strings.Join(lines, "\n"))
 

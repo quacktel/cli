@@ -36,6 +36,28 @@ func TestEnvClaudeCode(t *testing.T) {
 	require.Equal(t, envDefault+"export CLAUDE_CODE_ENABLE_TELEMETRY=1\n", out)
 }
 
+func TestEnvJSON(t *testing.T) {
+	out, err := runBin(t, "env", "--claude-code", "--json")
+	require.NoError(t, err)
+	var cfg struct {
+		Env map[string]string `json:"env"`
+	}
+	require.NoError(t, json.Unmarshal([]byte(out), &cfg))
+	require.Equal(t, map[string]string{
+		"OTEL_EXPORTER_OTLP_ENDPOINT":  "http://127.0.0.1:4318",
+		"OTEL_EXPORTER_OTLP_PROTOCOL":  "http/protobuf",
+		"OTEL_LOGS_EXPORTER":           "otlp",
+		"OTEL_TRACES_EXPORTER":         "otlp",
+		"OTEL_METRICS_EXPORTER":        "none",
+		"CLAUDE_CODE_ENABLE_TELEMETRY": "1",
+	}, cfg.Env)
+}
+
+func TestEnvJSONAndMCPConflict(t *testing.T) {
+	_, err := runBin(t, "env", "--json", "--mcp")
+	require.Error(t, err)
+}
+
 func TestEnvMCP(t *testing.T) {
 	want, err := filepath.EvalSymlinks(binPath)
 	require.NoError(t, err)
@@ -73,6 +95,15 @@ func TestEnvAuth(t *testing.T) {
 	out, err := runBin(t, "env", "--auth", "--data-dir", dir)
 	require.NoError(t, err)
 	require.Equal(t, envDefault+"export OTEL_EXPORTER_OTLP_HEADERS='authorization=Bearer "+token+"'\n", out)
+
+	// settings.json takes the raw header value, without shell quoting.
+	out, err = runBin(t, "env", "--auth", "--json", "--data-dir", dir)
+	require.NoError(t, err)
+	var cfg struct {
+		Env map[string]string `json:"env"`
+	}
+	require.NoError(t, json.Unmarshal([]byte(out), &cfg))
+	require.Equal(t, "authorization=Bearer "+token, cfg.Env["OTEL_EXPORTER_OTLP_HEADERS"])
 }
 
 func TestEnvAuthReadsInstalledServiceDataDir(t *testing.T) {
