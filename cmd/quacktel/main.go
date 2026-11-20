@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -15,6 +16,7 @@ import (
 	"github.com/alecthomas/kong"
 	"github.com/lmittmann/tint"
 
+	"github.com/quacktel/cli/internal/logfile"
 	"github.com/quacktel/cli/internal/receiver"
 )
 
@@ -26,7 +28,8 @@ var (
 )
 
 type Globals struct {
-	Debug bool `help:"Enable debug logging on stderr."`
+	Debug   bool   `help:"Enable debug logging on stderr."`
+	LogFile string `help:"Write logs to this file, rotated at 10 MiB, keeping 3 old files." type:"path"`
 
 	Logger *slog.Logger `kong:"-"`
 }
@@ -95,7 +98,23 @@ func main() {
 	}
 }
 
-func run() error {
+func newLogger(path string, level slog.Level) (*slog.Logger, func() error, error) {
+	if path == "" {
+		return slog.New(tint.NewTextHandler(os.Stderr, &tint.Options{
+			Level:   level,
+			NoColor: os.Getenv("NO_COLOR") != "",
+		})), func() error { return nil }, nil
+	}
+
+	w, err := logfile.Open(path, logfile.DefaultMaxBytes, logfile.DefaultKeep)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	return slog.New(tint.NewTextHandler(w, &tint.Options{Level: level, NoColor: true})), w.Close, nil
+}
+
+func run() (retErr error) {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
@@ -127,10 +146,12 @@ func run() error {
 	if args.Debug {
 		level = slog.LevelDebug
 	}
-	args.Logger = slog.New(tint.NewTextHandler(os.Stderr, &tint.Options{
-		Level:   level,
-		NoColor: os.Getenv("NO_COLOR") != "",
-	}))
+	logger, closeLog, err := newLogger(args.LogFile, level)
+	if err != nil {
+		return err
+	}
+	defer func() { retErr = errors.Join(retErr, closeLog()) }()
+	args.Logger = logger
 
 	kctx.BindTo(ctx, (*context.Context)(nil))
 	kctx.Bind(&args.Globals)

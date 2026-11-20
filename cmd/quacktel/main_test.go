@@ -275,6 +275,22 @@ func TestServeMaxInFlightFlag(t *testing.T) {
 	require.NoError(t, p.wait(t), p.stderr.String())
 }
 
+func TestServeLogFile(t *testing.T) {
+	logPath := filepath.Join(t.TempDir(), "logs", "q.log")
+	p := startServe(t, freeAddr(t), dataDir(t), "--log-file", logPath)
+
+	require.NoError(t, p.cmd.Process.Signal(syscall.SIGTERM))
+	require.NoError(t, p.wait(t), p.stderr.String())
+
+	b, err := os.ReadFile(logPath)
+	require.NoError(t, err)
+	require.Contains(t, string(b), "serving")
+	info, err := os.Stat(logPath)
+	require.NoError(t, err)
+	require.Equal(t, os.FileMode(0o600), info.Mode().Perm())
+	require.NotContains(t, p.stderr.String(), "serving")
+}
+
 func TestServeRefusesNonLoopback(t *testing.T) {
 	_, err := runBin(t, "serve", "--listen", "0.0.0.0:0", "--data-dir", dataDir(t))
 	require.Error(t, err)
