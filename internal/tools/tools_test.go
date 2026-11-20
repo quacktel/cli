@@ -19,7 +19,12 @@ import (
 func newRunner(t *testing.T, service string) *tools.Runner {
 	t.Helper()
 
-	dir := toolstest.Fixture(t)
+	return newRunnerDir(t, toolstest.Fixture(t), service)
+}
+
+func newRunnerDir(t *testing.T, dir, service string) *tools.Runner {
+	t.Helper()
+
 	opts := engine.Options{AllowedDir: filepath.Join(dir, "services"), DataDir: dir}
 	if service != "" {
 		opts.Service = service
@@ -182,6 +187,52 @@ func TestSearchLogsLimit(t *testing.T) {
 		require.NoError(t, err)
 		require.Len(t, rows.Rows, 6)
 	}
+}
+
+func TestSearchLogsDefaultLimit(t *testing.T) {
+	r := newRunnerDir(t, toolstest.FixtureBulkLogs(t, 40), "")
+	rows, err := r.SearchLogs(t.Context(), tools.SearchLogsInput{})
+	require.NoError(t, err)
+	require.Len(t, rows.Rows, 20)
+	require.True(t, rows.Truncated)
+
+	rows, err = r.SearchLogs(t.Context(), tools.SearchLogsInput{Limit: 30})
+	require.NoError(t, err)
+	require.Len(t, rows.Rows, 30)
+}
+
+func TestResultBudget(t *testing.T) {
+	r := newRunner(t, "")
+	rows, err := r.SQL(t.Context(), tools.SQLInput{Query: "SELECT repeat('x', 1900) AS s FROM range(500)", Limit: 500})
+	require.NoError(t, err)
+	require.True(t, rows.Truncated)
+	require.NotEmpty(t, rows.Rows)
+	require.Less(t, len(rows.Rows), 500)
+	b, err := json.Marshal(rows.Rows)
+	require.NoError(t, err)
+	require.LessOrEqual(t, len(b), 40000)
+}
+
+func TestDescribeSchemaEventName(t *testing.T) {
+	r := newRunner(t, "")
+	out, err := r.DescribeSchema(t.Context(), tools.DescribeSchemaInput{EventName: "tool.call"})
+	require.NoError(t, err)
+	keys := map[string]tools.AttributeKey{}
+	for _, k := range out.Logs.TopAttributeKeys {
+		keys[k.Key] = k
+	}
+	require.Equal(t, int64(1), keys["tool"].Count)
+	require.Contains(t, keys, "odd'key")
+	spanKeys := []string{}
+	for _, k := range out.Spans.TopAttributeKeys {
+		spanKeys = append(spanKeys, k.Key)
+	}
+	require.Contains(t, spanKeys, "tool")
+
+	out, err = r.DescribeSchema(t.Context(), tools.DescribeSchemaInput{EventName: "no.such.event"})
+	require.NoError(t, err)
+	require.Empty(t, out.Logs.TopAttributeKeys)
+	require.NotEmpty(t, out.Spans.TopAttributeKeys)
 }
 
 func TestLimitDefaultAndClamp(t *testing.T) {

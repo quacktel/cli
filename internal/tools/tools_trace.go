@@ -8,7 +8,7 @@ import (
 const (
 	maxTraceSpans = 1000
 	maxTraceLogs  = 500
-	topAttrKeys   = 30
+	topAttrKeys   = 50
 )
 
 type GetTraceInput struct {
@@ -51,7 +51,8 @@ func (r *Runner) GetTrace(ctx context.Context, in GetTraceInput) (TraceOutput, e
 		return TraceOutput{}, fmt.Errorf("failed to get trace logs: %w", err)
 	}
 
-	spans, logs := toRows(sres), toRows(lres)
+	spans, used := toRowsBudget(sres, maxResultChars)
+	logs, _ := toRowsBudget(lres, maxResultChars-used)
 	addDepths(spans.Rows)
 	for _, s := range spans.Rows {
 		if s["event_names"] == nil {
@@ -97,7 +98,7 @@ func (r *Runner) SQL(ctx context.Context, in SQLInput) (Rows, error) {
 	if in.Query == "" {
 		return Rows{}, inputErr("query is required")
 	}
-	res, err := r.Eng.Query(ctx, in.Query, clampLimit(in.Limit))
+	res, err := r.Eng.Query(ctx, in.Query, clampLimit(in.Limit, defaultLimit))
 	if err != nil {
 		if ctx.Err() != nil {
 			return Rows{}, fmt.Errorf("query cancelled: %w", err)

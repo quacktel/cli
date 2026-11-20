@@ -119,6 +119,19 @@ func addSpans(td ptrace.Traces, service string, specs []spanSpec) {
 func Fixture(t *testing.T) string {
 	t.Helper()
 
+	return fixture(t, 0)
+}
+
+// FixtureBulkLogs is Fixture plus n extra recent "bulk" logs in the agent service.
+func FixtureBulkLogs(t *testing.T, n int) string {
+	t.Helper()
+
+	return fixture(t, n)
+}
+
+func fixture(t *testing.T, bulk int) string {
+	t.Helper()
+
 	t.Setenv("HOME", t.TempDir())
 	dir := filepath.Join(t.TempDir(), "d")
 	s, err := store.Open(t.Context(), store.Options{DataDir: dir, Now: func() time.Time { return Now }})
@@ -134,6 +147,13 @@ func Fixture(t *testing.T) string {
 		{at: -5 * time.Minute, sev: plog.SeverityNumberWarn, sevText: "WARN", body: "retrying", trace: traceBytes, span: childID, hasTrace: true},
 		{at: -30 * time.Hour, sev: plog.SeverityNumberInfo, sevText: "INFO", body: "ancient"},
 	})
+	if bulk > 0 {
+		specs := make([]logSpec, bulk)
+		for i := range specs {
+			specs[i] = logSpec{at: -2 * time.Minute, sev: plog.SeverityNumberInfo, sevText: "INFO", body: "bulk"}
+		}
+		addLogs(ld, "agent", specs)
+	}
 	addLogs(ld, "web", []logSpec{
 		{at: -2 * time.Hour, sev: plog.SeverityNumberInfo, sevText: "INFO", body: "web request"},
 	})

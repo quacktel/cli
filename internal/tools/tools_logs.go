@@ -37,6 +37,8 @@ SELECT service_name, 0 AS logs, 1 AS spans, start_time AS ts FROM spans WHERE st
 
 type SearchLogsInput struct {
 	Common
+	// Shadows Common.Limit so the schema documents search_logs' lower default.
+	Limit       int               `json:"limit,omitempty" jsonschema:"Maximum rows to return. Defaults to 20, capped at 500."`
 	MinSeverity string            `json:"min_severity,omitempty" jsonschema:"Minimum severity: a number 1-24 or one of trace, debug, info, warn, error, fatal."`
 	Text        string            `json:"text,omitempty" jsonschema:"Case-insensitive substring of the log body."`
 	Regex       string            `json:"regex,omitempty" jsonschema:"RE2 regular expression matched against the log body."`
@@ -109,7 +111,7 @@ func (r *Runner) SearchLogs(ctx context.Context, in SearchLogsInput) (Rows, erro
 	q.attrs(in.Attrs)
 	q.add("ORDER BY time DESC")
 
-	res, err := r.run(ctx, q, clampLimit(in.Limit))
+	res, err := r.run(ctx, q, clampLimit(in.Limit, defaultSearchLimit))
 	if err != nil {
 		return Rows{}, fmt.Errorf("failed to search logs: %w", err)
 	}
@@ -173,7 +175,7 @@ func (r *Runner) FindSpans(ctx context.Context, in FindSpansInput) (Rows, error)
 	q.attrs(in.Attrs)
 	q.add("ORDER BY duration_ns DESC NULLS LAST")
 
-	res, err := r.run(ctx, q, clampLimit(in.Limit))
+	res, err := r.run(ctx, q, clampLimit(in.Limit, defaultLimit))
 	if err != nil {
 		return Rows{}, fmt.Errorf("failed to find spans: %w", err)
 	}

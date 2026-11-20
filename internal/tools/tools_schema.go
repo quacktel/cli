@@ -6,7 +6,8 @@ import (
 )
 
 type DescribeSchemaInput struct {
-	Service string `json:"service,omitempty" jsonschema:"Only count attribute keys for this service."`
+	Service   string `json:"service,omitempty" jsonschema:"Only count attribute keys for this service."`
+	EventName string `json:"event_name,omitempty" jsonschema:"Only count log attribute keys for this event name; spans are unaffected."`
 }
 
 type Column struct {
@@ -62,6 +63,9 @@ func (r *Runner) DescribeSchema(ctx context.Context, in DescribeSchemaInput) (Sc
 		inner := newQuery(sig.keys, since)
 		if svc != "" {
 			inner.add("AND service_name = ?", svc)
+		}
+		if sig.dst == &out.Logs && in.EventName != "" {
+			inner.add("AND event_name = ?", in.EventName)
 		}
 		q := newQuery("SELECT key, count(*)::BIGINT AS n, any_value(attrs[key]) AS example FROM ("+inner.sql.String()+") GROUP BY key ORDER BY n DESC, key", inner.args...)
 		res, err := r.run(ctx, q, topAttrKeys)

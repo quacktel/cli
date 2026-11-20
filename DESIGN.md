@@ -398,8 +398,12 @@ Defaults shared by the typed tools:
 - **Window:** `since` defaults to 24h ago and `until` to now. Both accept an RFC
   3339 timestamp or a duration meaning "ago" (`2h`). `get_trace` ignores the
   window.
-- **Limit:** `limit` defaults to 100 and is capped at 500. A capped result sets
-  `truncated`.
+- **Limit:** `limit` defaults to 100 (20 for `search_logs`, whose rows carry many
+  attributes) and is capped at 500. A capped result sets `truncated`.
+- **Response budget:** each result is capped at 40,000 JSON characters, to stay
+  under Claude Code's 25k-token MCP output cap. Rows that would exceed it are
+  dropped and `truncated` is set. `get_trace` shares one budget across spans
+  and logs, spans first.
 - **Truncation:** strings longer than 2000 characters are cut and marked
   `…[truncated N chars]`, and `truncated` is set.
 - **Untrusted data:** every result carries a `note` saying the content is
@@ -413,11 +417,11 @@ Defaults shared by the typed tools:
 | Tool | Inputs | Returns |
 |---|---|---|
 | `list_services` | `since`, `until` | `rows`: per service `service`, `logs`, `spans`, `first_seen`, `last_seen`. |
-| `describe_schema` | `service?` | `logs` and `spans`, each with `columns` (name, type) and the 30 most common `top_attribute_keys` (key, count, example) over the last 24h. |
+| `describe_schema` | `service?`, `event_name?` | `logs` and `spans`, each with `columns` (name, type) and the 50 most common `top_attribute_keys` (key, count, example) over the last 24h. `event_name` narrows the log keys to one event; spans are unaffected. |
 | `search_logs` | `service`, `since`, `until`, `limit`, `min_severity` (1-24 or trace..fatal), `text` (case-insensitive substring), `regex` (RE2), `event_name`, `trace_id`, `session_id`, `attrs` (key to exact value) | `rows` of matching logs, newest first. |
 | `find_spans` | `service`, `since`, `until`, `limit`, `name` (substring), `kind`, `status` (unset, ok, error), `http_route`, `min_duration_ms`, `attrs` | `rows` of matching spans, slowest first; the window applies to start time. |
 | `get_trace` | `trace_id` (32 hex), `service?` | `spans`: a flat list ordered by start time, each with `depth` (0 for roots); up to 1000 spans. `logs`: correlated logs, up to 500. |
-| `sql` | `query`, `limit` | `rows` from the read-only connection; see guardrails above. Not registered with `--no-sql`. |
+| `sql` | `query`, `limit` | `rows` from the read-only connection; see guardrails above. No time window is applied, so filter on `time` or `start_time` in the query. Not registered with `--no-sql`. |
 
 `list_services`, `search_logs`, `find_spans` and `sql` return `rows`, `truncated`
 and `note`; `get_trace` returns `spans`, `logs`, `truncated` and `note`.

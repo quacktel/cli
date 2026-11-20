@@ -2,6 +2,7 @@ package mcpserver_test
 
 import (
 	"context"
+	"encoding/json"
 	"io/fs"
 	"path/filepath"
 	"slices"
@@ -95,10 +96,10 @@ func TestCallEachTool(t *testing.T) {
 	}{
 		{"list_services", map[string]any{}, "2 rows", "rows"},
 		{"describe_schema", map[string]any{}, "", "logs"},
-		{"search_logs", map[string]any{"min_severity": "error"}, "1 rows", "rows"},
-		{"find_spans", map[string]any{"status": "error", "limit": 1}, "1 rows (truncated)", "rows"},
-		{"get_trace", map[string]any{"trace_id": toolstest.TraceID}, "4 spans, 1 logs", "spans"},
-		{"sql", map[string]any{"query": "SELECT count(*) AS n FROM logs"}, "1 rows", "rows"},
+		{"search_logs", map[string]any{"min_severity": "error"}, "1 row", "rows"},
+		{"find_spans", map[string]any{"status": "error", "limit": 1}, "1 row (truncated)", "rows"},
+		{"get_trace", map[string]any{"trace_id": toolstest.TraceID}, "4 spans, 1 log", "spans"},
+		{"sql", map[string]any{"query": "SELECT count(*) AS n FROM logs"}, "1 row", "rows"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -157,4 +158,22 @@ func TestScopedSQLCannotReadOtherService(t *testing.T) {
 	require.False(t, res.IsError, text(t, res))
 	rows := res.StructuredContent.(map[string]any)["rows"].([]any)
 	require.Len(t, rows, 1)
+}
+
+func TestSQLDescriptionHasNoWindow(t *testing.T) {
+	cs := connect(t, toolstest.Fixture(t), "", true)
+	res, err := cs.ListTools(t.Context(), nil)
+	require.NoError(t, err)
+	for _, tool := range res.Tools {
+		if tool.Name == "sql" {
+			require.NotContains(t, tool.Description, "since")
+			require.Contains(t, tool.Description, "No time window")
+		}
+		if tool.Name == "search_logs" {
+			b, err := json.Marshal(tool.InputSchema)
+			require.NoError(t, err)
+			require.Contains(t, string(b), "Defaults to 20")
+			require.NotContains(t, string(b), "Defaults to 100")
+		}
+	}
 }
