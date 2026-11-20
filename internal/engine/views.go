@@ -3,7 +3,9 @@ package engine
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"slices"
@@ -36,17 +38,23 @@ func within(root, dir string) bool {
 }
 
 // fingerprint changes whenever a manifest is added, removed or rewritten.
-func fingerprint(loaded []manifest.Loaded) (string, error) {
+// Retention can remove a service between Glob and Stat, so a vanished manifest drops that service rather than failing the query.
+func fingerprint(loaded []manifest.Loaded) (string, []manifest.Loaded, error) {
 	var sb strings.Builder
+	kept := loaded[:0:0]
 	for _, l := range loaded {
 		fi, err := os.Stat(filepath.Join(l.Dir, manifest.Name))
+		if errors.Is(err, fs.ErrNotExist) {
+			continue
+		}
 		if err != nil {
-			return "", fmt.Errorf("failed to stat manifest: %w", err)
+			return "", nil, fmt.Errorf("failed to stat manifest: %w", err)
 		}
 		fmt.Fprintf(&sb, "%s|%d|%d\n", l.Dir, l.Manifest.Generation, fi.ModTime().UnixNano())
+		kept = append(kept, l)
 	}
 
-	return sb.String(), nil
+	return sb.String(), kept, nil
 }
 
 // refresh rebuilds the views when the manifests changed since the last build.
@@ -62,7 +70,7 @@ func (e *Engine) refresh(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("failed to read manifests: %w", err)
 	}
-	fp, err := fingerprint(loaded)
+	fp, loaded, err := fingerprint(loaded)
 	if err != nil {
 		return err
 	}

@@ -371,6 +371,34 @@ func TestCompactionCrashSafety(t *testing.T) {
 	require.Len(t, slices.Compact(slices.Clone(seqs)), 12)
 }
 
+func TestUncommittedMergeDiscardedOnRestart(t *testing.T) {
+	dataDir := newDataDir(t)
+	clk := newClock(baseTime)
+	s := openStore(t, Options{DataDir: dataDir, Now: clk.Now})
+	for i := range 3 {
+		appendFlush(t, s, "svc", clk.Now(), int64(i))
+	}
+	require.NoError(t, s.Close())
+
+	// Simulate a crash after the merged file was renamed into place but before the manifest publish.
+	files := listedFiles(t, dataDir, "svc", signalLogs)
+	require.Len(t, files, 3)
+	svcDir := filepath.Join(dataDir, "services", ServiceDir("svc"))
+	src, err := os.ReadFile(filepath.Join(svcDir, files[0].Path))
+	require.NoError(t, err)
+	orphan := filepath.Join(svcDir, filepath.Dir(files[0].Path), sealedPrefix+"orphan.parquet")
+	require.NoError(t, os.WriteFile(orphan, src, 0o600))
+
+	s = openStore(t, Options{DataDir: dataDir, Now: clk.Now})
+	require.NoFileExists(t, orphan)
+	require.Len(t, listedFiles(t, dataDir, "svc", signalLogs), 3)
+
+	e := spansEngine(t, dataDir)
+	seqs := listedSeqs(t, e, dataDir, "svc", signalLogs)
+	require.ElementsMatch(t, []int64{0, 1, 2}, seqs)
+	require.NoError(t, s.Close())
+}
+
 func TestRetiredGrace(t *testing.T) {
 	dataDir := newDataDir(t)
 	clk := newClock(baseTime)

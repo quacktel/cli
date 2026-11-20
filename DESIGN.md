@@ -118,9 +118,10 @@ time, so skewed or hostile timestamps can't write into old partitions. The
 manifest keeps each file's min/max record time for readers.
 
 **One serve per data dir.** `serve` takes an exclusive flock on `.lock` and
-refuses to start if it is held. On startup it reconciles files the manifest
-doesn't list (for example after a crash between rename and publish) into the
-manifest.
+refuses to start if it is held. On startup it deletes retired files, adds
+unlisted `tail-*` files (a flush that crashed between rename and publish), and
+deletes unlisted `sealed-*`/`hour-*` files: those are compactions that never
+published, whose sources are still listed, so keeping them would duplicate rows.
 
 **Service directories.** `service.name` is untrusted input, so it is never used
 as a path as-is:
@@ -513,10 +514,6 @@ Not reused: Substrait, Participle SQL, and the custom executor.
 - **Flush swaps buffers and writes outside the store lock** (M3), so requests
   don't wait on disk. A failed write keeps the batch pending and retries next
   pass; pending bytes count toward the buffer cap, so a failing disk ends in 429.
-- **A crash between a compaction's rename and its publish** leaves the merged
-  file unlisted next to its still-listed sources, and startup reconcile would
-  list both (duplicate rows). Rare; a fix would stage merged files under a
-  non-`.parquet` name.
 - **Stringified attribute values** lose types (numeric comparisons need a
   `CAST`). Typed tools hide this; the `sql` tool docs must mention it.
 - **The span promoted-key set** was chosen in M2 from the OpenTelemetry HTTP and GenAI conventions, not from real samples. Revisit it against real agent traces; a change bumps the schema version.

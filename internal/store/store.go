@@ -280,6 +280,7 @@ func (s *Store) load(dir string) error {
 // reconcile describes parquet files under dir/signal that the manifest does not list.
 func reconcile(dir, signal string, listed map[string]bool) ([]manifest.File, error) {
 	var found []manifest.File
+	var orphans []string
 	err := filepath.WalkDir(filepath.Join(dir, signal), func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
 			if errors.Is(err, fs.ErrNotExist) {
@@ -298,6 +299,12 @@ func reconcile(dir, signal string, listed map[string]bool) ([]manifest.File, err
 		if listed[rel] {
 			return nil
 		}
+		// An unlisted merge output is an uncommitted compaction whose sources are still listed, so keeping it would duplicate rows.
+		if strings.HasPrefix(d.Name(), sealedPrefix) || strings.HasPrefix(d.Name(), hourPrefix) {
+			orphans = append(orphans, path)
+
+			return nil
+		}
 		mf, err := describe(path, rel, signal)
 		if err != nil {
 			return err
@@ -307,7 +314,16 @@ func reconcile(dir, signal string, listed map[string]bool) ([]manifest.File, err
 		return nil
 	})
 
-	return found, err
+	if err != nil {
+		return nil, err
+	}
+	for _, p := range orphans {
+		if err := os.Remove(p); err != nil && !errors.Is(err, fs.ErrNotExist) {
+			return nil, fmt.Errorf("failed to remove uncommitted merge %s: %w", p, err)
+		}
+	}
+
+	return found, nil
 }
 
 func describe(path, rel, signal string) (manifest.File, error) {
