@@ -179,20 +179,27 @@ values are stringified. Arrays and maps in attributes are JSON-encoded strings.
 
 | Column | Type | Source |
 |---|---|---|
-| `trace_id`, `span_id`, `parent_span_id` | VARCHAR | Span |
-| `name`, `kind` | VARCHAR | Span |
+| `trace_id`, `span_id` | VARCHAR | Span |
+| `parent_span_id` | VARCHAR | Span; null for a root span |
+| `trace_state`, `name` | VARCHAR | Span |
+| `kind` | VARCHAR | Span kind, lowercase: `unspecified`, `internal`, `server`, `client`, `producer`, `consumer` |
 | `start_time`, `end_time` | TIMESTAMP_NS | Span |
-| `duration_ns` | INT64 | computed |
-| `status_code`, `status_message` | VARCHAR | Span status |
+| `duration_ns` | INT64 | `end - start`; null when either time is zero or the span ends before it starts |
+| `status_code` | VARCHAR | Span status, lowercase: `unset`, `ok`, `error` |
+| `status_message` | VARCHAR | Span status |
 | `service_name` | VARCHAR | resource `service.name` |
 | `scope_name`, `scope_version` | VARCHAR | InstrumentationScope |
-| `resource_attrs`, `attrs` | MAP(VARCHAR, VARCHAR) | remaining attributes |
+| `session_id` | VARCHAR | attribute `session.id` |
+| `http_request_method`, `http_route` | VARCHAR | attributes `http.request.method`, `http.route` |
+| `http_response_status_code` | INT64 | attribute `http.response.status_code` (a numeric string is accepted) |
+| `gen_ai_request_model` | VARCHAR | attribute `gen_ai.request.model` |
+| `gen_ai_usage_input_tokens`, `gen_ai_usage_output_tokens` | INT64 | attributes `gen_ai.usage.input_tokens`, `gen_ai.usage.output_tokens` |
+| `resource_attrs`, `attrs` | MAP(VARCHAR, VARCHAR) | all attributes (promoted keys are copied, not removed) |
 | `events` | LIST(STRUCT(time, name, attrs MAP)) | Span events (exceptions) |
-| `links` | LIST(STRUCT(trace_id, span_id, attrs MAP)) | Span links |
+| `links` | LIST(STRUCT(trace_id, span_id, trace_state, attrs MAP)) | Span links |
 
 **Promoted keys.** Logs promote `event_name` and `session_id`, copied from the
-record and left in `attrs`. Span keys (for example `http.request.method`,
-`http.response.status_code`, `gen_ai.request.model`) are finalised in M2. Any change to the promoted set bumps the schema version, recorded in Parquet
+record and left in `attrs`. Spans promote `session_id`, the HTTP keys and the `gen_ai` keys listed above, also copied. Any change to the promoted set bumps the schema version, recorded in Parquet
 key-value metadata and in the manifest. Readers union schema versions by column
 name (`union_by_name`).
 
@@ -211,8 +218,7 @@ name (`union_by_name`).
   `Origin`, `Host`, `Authorization`, `Content-Type`, in-flight slot, body.
 - Require `Content-Type` to be `application/x-protobuf` or `application/json`.
   Browsers must preflight these, and preflights are never answered.
-- Accept only `POST /v1/logs` (and `/v1/traces` from M2; it returns `404` until
-  then). `/v1/metrics` returns `200` and drops the data, counted in `doctor`, so
+- Accept only `POST /v1/logs` and `POST /v1/traces`. `/v1/metrics` returns `200` and drops the data, counted in `doctor`, so
   exporters that also send metrics (Claude Code) don't log errors.
 - With `--unsafe-bind` on a non-loopback address, the bound `host:port` is also
   an allowed `Host`, since remote clients send it. No other gate changes.
@@ -365,6 +371,15 @@ common SDKs. Claude Code's cost and token data arrives as log events
 (Verify the current event names and attributes against the Claude Code
 monitoring docs in M1.)
 
+### Example app
+
+`examples/otel-go-app` is a separate Go module that sends one synthetic trace
+(a server, a client `gen_ai` and an internal error span):
+
+```sh
+OTEL_EXPORTER_OTLP_ENDPOINT=http://127.0.0.1:4318 go run -C examples/otel-go-app .
+```
+
 ### OpenShell
 
 The OpenShell gateway runs on the same host and exports sandbox network events
@@ -463,7 +478,7 @@ Not reused: Substrait, Participle SQL, and the custom executor.
 |---|---|---|
 | M0 | Repo scaffold, Kong CLI skeleton, CI (lint + test on macOS arm64), DuckDB static-link spike | `go install ./cmd/quacktel` on a Mac gives a binary that runs `SELECT 42` through DuckDB, with no runtime extension downloads; hardening settings verified by tests. |
 | M1 | Receiver + redaction + logs writer + per-service layout + manifest | Claude Code logs land in Parquet; hostile `service.name` values (traversal, unicode, overflow past the cap) are handled; the hardening tests pass (Origin, Host, Content-Type, caps, 429). |
-| M2 | Spans writer | A Go/Node sample app's traces land and can be queried. |
+| M2 (done) | Spans writer | A Go/Node sample app's traces land and can be queried. |
 | M3 | Compaction + retention (including removal of expired service directories) + size cap | A 24h soak shows a bounded file count, no duplicate rows, and the cap enforced. |
 | M4 | `engine`, `tools`, `mcp`, `query` | All six tools work against fixtures; the SELECT guard rejects the bypass corpus; a scoped session can't read another service's files through `sql`/`read_parquet`. |
 | M5 | `service` (launchd), `doctor`, `env` | Install, reboot, data still flowing, on macOS. |
@@ -500,7 +515,9 @@ Not reused: Substrait, Participle SQL, and the custom executor.
 - **A failed flush drops that batch's rows** (logged). M3 should retry.
 - **Stringified attribute values** lose types (numeric comparisons need a
   `CAST`). Typed tools hide this; the `sql` tool docs must mention it.
-- **The span promoted-key set** is finalised in M2 from real samples.
+- **The span promoted-key set** was chosen in M2 from the OpenTelemetry HTTP and GenAI conventions, not from real samples. Revisit it against real agent traces; a change bumps the schema version.
+- **Span attribute keys follow the current semantic conventions only.** Senders on older names (for example `http.method`, `http.status_code`) get no promoted columns; the values stay in `attrs`.
+- **The example module pins OpenTelemetry Go.** `mise run check:tidy` and the e2e build cover it, but bumping the SDK is a manual change.
 - **No notarisation:** browser downloads trigger a Gatekeeper block, and
   there's no Apple-backed identity on the binary. Mitigations: the Homebrew
   and `install.sh` paths, plus GitHub attestations. Revisit if users hit this

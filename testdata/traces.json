@@ -1,0 +1,50 @@
+{
+  "resourceSpans": [
+    {
+      "resource": {
+        "attributes": [
+          {"key": "service.name", "value": {"stringValue": "json-svc"}}
+        ]
+      },
+      "scopeSpans": [
+        {
+          "scope": {"name": "test-scope"},
+          "spans": [
+            {
+              "traceId": "0123456789abcdef0123456789abcdef",
+              "spanId": "00000000000000a1",
+              "name": "GET /missing",
+              "kind": 2,
+              "startTimeUnixNano": "1780000000000000000",
+              "endTimeUnixNano": "1780000000005000000",
+              "attributes": [
+                {"key": "http.request.method", "value": {"stringValue": "GET"}},
+                {"key": "http.response.status_code", "value": {"stringValue": "404"}}
+              ],
+              "events": [
+                {
+                  "timeUnixNano": "1780000000002000000",
+                  "name": "not-found",
+                  "attributes": [
+                    {"key": "path", "value": {"stringValue": "/missing"}}
+                  ]
+                }
+              ],
+              "status": {"code": 2, "message": "not found"}
+            },
+            {
+              "traceId": "0123456789abcdef0123456789abcdef",
+              "spanId": "00000000000000a2",
+              "parentSpanId": "00000000000000a1",
+              "name": "lookup",
+              "kind": 1,
+              "startTimeUnixNano": "1780000000001000000",
+              "endTimeUnixNano": "1780000000003000000",
+              "status": {"code": 1}
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

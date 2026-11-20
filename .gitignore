@@ -5,3 +5,4 @@ dist/
 /internal/server/ui/dist/
 /durable
 node_modules/
+/examples/otel-go-app/otel-go-app

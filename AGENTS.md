@@ -37,7 +37,7 @@ mise exec -- golangci-lint run ./...
 mise run check:tidy
 ```
 
-The `cmd/quacktel` tests build and run the real binary.
+The `cmd/quacktel` tests build and run the real binary. `examples/otel-go-app` is a separate module that `./...` skips. `mise run check:tidy` covers it, and the e2e tests build it.
 
 ## Guiding principles
 

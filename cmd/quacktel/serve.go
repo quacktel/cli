@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"go.opentelemetry.io/collector/pdata/plog"
+	"go.opentelemetry.io/collector/pdata/ptrace"
 
 	"github.com/quacktel/cli/internal/paths"
 	"github.com/quacktel/cli/internal/receiver"
@@ -42,6 +43,8 @@ type statsFile struct {
 	ValuesRedacted  int64     `json:"values_redacted"`
 	Unauthorized    int64     `json:"unauthorized"`
 	Responses429    int64     `json:"responses_429"`
+	SpansAccepted   int64     `json:"spans_accepted"`
+	SpansRejected   int64     `json:"spans_rejected"`
 	MetricsDropped  int64     `json:"metrics_dropped"`
 	Flushes         int64     `json:"flushes"`
 	FilesWritten    int64     `json:"files_written"`
@@ -91,6 +94,15 @@ func (c *serveCmd) Run(ctx context.Context, globals *Globals) error {
 
 		return rejected, msg, err
 	}
+	traces := func(ctx context.Context, td ptrace.Traces) (int64, string, error) {
+		redacted.Add(int64(redactor.Traces(td)))
+		rejected, msg, err := st.AppendTraces(ctx, td)
+		if errors.Is(err, store.ErrFull) {
+			err = fmt.Errorf("%w: %w", receiver.ErrFull, err)
+		}
+
+		return rejected, msg, err
+	}
 
 	srv, err := receiver.New(receiver.Options{
 		Addr:        c.Listen,
@@ -99,7 +111,7 @@ func (c *serveCmd) Run(ctx context.Context, globals *Globals) error {
 		MaxInFlight: c.MaxInFlight,
 		Token:       token,
 		Logger:      globals.Logger,
-	}, receiver.Sinks{Logs: sink})
+	}, receiver.Sinks{Logs: sink, Traces: traces})
 	if err != nil {
 		return errors.Join(fmt.Errorf("failed to start receiver: %w", err), st.Close())
 	}
@@ -143,6 +155,8 @@ func saveStats(dir string, rs receiver.Stats, ss store.Stats, redacted int64) (e
 		ValuesRedacted:  redacted,
 		Unauthorized:    rs.Unauthorized,
 		Responses429:    rs.Responses429,
+		SpansAccepted:   rs.SpansAccepted,
+		SpansRejected:   rs.SpansRejected,
 		MetricsDropped:  rs.MetricsDropped,
 		Flushes:         ss.Flushes,
 		FilesWritten:    ss.FilesWritten,

@@ -9,7 +9,7 @@ goreleaser = "2.20.2"
 lefthook = "2.2.2"
 
 [tasks."check:tidy"]
-run = "go mod tidy -diff"
+run = ["go mod tidy -diff", "go -C examples/otel-go-app mod tidy -diff"]
 
 [tasks."check:lint"]
 run = "golangci-lint run --timeout 3m"

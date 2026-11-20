@@ -13,6 +13,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strings"
 	"sync"
 	"syscall"
@@ -423,4 +424,125 @@ func TestServeOpenShellOCSF(t *testing.T) {
 	require.Equal(t, "openshell.ocsf.gap", rows[0]["event_name"])
 	require.Equal(t, "7", rows[0]["dropped"])
 	require.Equal(t, "sb-test", rows[0]["sb"])
+}
+
+func queryRows(t *testing.T, dir, sql string) []map[string]any {
+	t.Helper()
+	out, err := runBin(t, "query", "--data-dir", dir, "--format", "json", sql)
+	require.NoError(t, err)
+	var rows []map[string]any
+	require.NoError(t, json.Unmarshal([]byte(out), &rows))
+
+	return rows
+}
+
+func readStats(t *testing.T, dir string) map[string]any {
+	t.Helper()
+	raw, err := os.ReadFile(filepath.Join(dir, "stats.json"))
+	require.NoError(t, err)
+	var stats map[string]any
+	require.NoError(t, json.Unmarshal(raw, &stats))
+
+	return stats
+}
+
+func TestServeTracesFromGoApp(t *testing.T) {
+	addr := freeAddr(t)
+	dir := dataDir(t)
+	p := startServe(t, addr, dir)
+
+	appBin := filepath.Join(t.TempDir(), "app")
+	build := exec.CommandContext(t.Context(), "go", "build", "-C", filepath.Join("..", "..", "examples", "otel-go-app"), "-o", appBin, ".")
+	// The example is built without the race detector, which the test run's GOFLAGS may request.
+	build.Env = append(os.Environ(), "GOFLAGS="+strings.Join(slices.DeleteFunc(strings.Fields(os.Getenv("GOFLAGS")), func(f string) bool {
+		return f == "-race"
+	}), " "))
+	out, err := build.CombinedOutput()
+	require.NoError(t, err, string(out))
+
+	app := exec.CommandContext(t.Context(), appBin)
+	app.Env = append(os.Environ(),
+		"OTEL_EXPORTER_OTLP_ENDPOINT=http://"+addr,
+		"OTEL_EXPORTER_OTLP_PROTOCOL=http/protobuf",
+		"HOME="+t.TempDir())
+	out, err = app.CombinedOutput()
+	require.NoError(t, err, string(out))
+
+	require.NoError(t, p.cmd.Process.Signal(syscall.SIGTERM))
+	require.NoError(t, p.wait(t), p.stderr.String())
+
+	rows := queryRows(t, dir, "SELECT trace_id, span_id, parent_span_id, name, kind, status_code, http_request_method, http_route, "+
+		"http_response_status_code, gen_ai_request_model, gen_ai_usage_input_tokens, gen_ai_usage_output_tokens, session_id, "+
+		"attrs['auth_token'] AS tok, len(events) AS n_events, events[1].name AS ev, duration_ns "+
+		"FROM read_parquet('"+dir+"/services/*/spans/**/*.parquet') ORDER BY name")
+	require.Len(t, rows, 3)
+	// Byte order sorts the uppercase root first.
+	root, chat, cache := rows[0], rows[1], rows[2]
+	require.Equal(t, "GET /items", root["name"])
+	require.Equal(t, "chat test-model", chat["name"])
+	require.Equal(t, "load-cache", cache["name"])
+	for _, r := range rows {
+		require.Equal(t, root["trace_id"], r["trace_id"])
+		require.GreaterOrEqual(t, r["duration_ns"], float64(0))
+	}
+
+	require.Nil(t, root["parent_span_id"])
+	require.Equal(t, root["span_id"], chat["parent_span_id"])
+	require.Equal(t, root["span_id"], cache["parent_span_id"])
+
+	require.Equal(t, "server", root["kind"])
+	require.Equal(t, "client", chat["kind"])
+	require.Equal(t, "internal", cache["kind"])
+
+	require.Equal(t, "GET", root["http_request_method"])
+	require.Equal(t, "/items", root["http_route"])
+	require.EqualValues(t, 200, root["http_response_status_code"])
+
+	require.Equal(t, "test-model", chat["gen_ai_request_model"])
+	require.EqualValues(t, 12, chat["gen_ai_usage_input_tokens"])
+	require.EqualValues(t, 34, chat["gen_ai_usage_output_tokens"])
+	require.Equal(t, "sess-go-1", chat["session_id"])
+	require.Equal(t, "[REDACTED]", chat["tok"])
+	require.Equal(t, "retry", chat["ev"])
+
+	require.Equal(t, "error", cache["status_code"])
+	require.Equal(t, "exception", cache["ev"])
+
+	require.EqualValues(t, 3, readStats(t, dir)["spans_accepted"])
+
+	require.NoError(t, filepath.WalkDir(dir, func(path string, d fs.DirEntry, err error) error {
+		require.NoError(t, err)
+		if d.IsDir() {
+			return nil
+		}
+		b, err := os.ReadFile(path)
+		require.NoError(t, err)
+		require.NotContains(t, string(b), "tok-not-real", path)
+
+		return nil
+	}))
+}
+
+func TestServeTracesJSON(t *testing.T) {
+	fixture, err := os.ReadFile(filepath.Join("..", "..", "testdata", "traces.json"))
+	require.NoError(t, err)
+
+	addr := freeAddr(t)
+	dir := dataDir(t)
+	p := startServe(t, addr, dir)
+	require.Equal(t, http.StatusOK, post(t, "http://"+addr+"/v1/traces", "application/json", fixture))
+	require.NoError(t, p.cmd.Process.Signal(syscall.SIGTERM))
+	require.NoError(t, p.wait(t), p.stderr.String())
+
+	rows := queryRows(t, dir, "SELECT name, kind, status_code, http_response_status_code, service_name "+
+		"FROM read_parquet('"+dir+"/services/*/spans/**/*.parquet') ORDER BY name")
+	require.Len(t, rows, 2)
+	require.Equal(t, "GET /missing", rows[0]["name"])
+	require.Equal(t, "server", rows[0]["kind"])
+	require.Equal(t, "error", rows[0]["status_code"])
+	require.EqualValues(t, 404, rows[0]["http_response_status_code"])
+	require.Equal(t, "json-svc", rows[0]["service_name"])
+	require.Equal(t, "lookup", rows[1]["name"])
+	require.Equal(t, "internal", rows[1]["kind"])
+	require.Equal(t, "ok", rows[1]["status_code"])
 }
