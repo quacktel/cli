@@ -734,3 +734,19 @@ func TestQueryTableNullIsEmpty(t *testing.T) {
 	require.Len(t, lines, 2)
 	require.Equal(t, []string{"1", "x"}, strings.Fields(lines[1]))
 }
+
+func TestMCPMissingDataDir(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "absent")
+	cmd := exec.CommandContext(t.Context(), binPath, "mcp", "--data-dir", dir)
+	cmd.Env = append(os.Environ(), "HOME="+t.TempDir())
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+
+	err := cmd.Run()
+	var exitErr *exec.ExitError
+	require.ErrorAs(t, err, &exitErr)
+	require.Empty(t, stdout.String())
+	require.Contains(t, stderr.String(), "run quacktel serve first")
+	require.NoDirExists(t, dir)
+}

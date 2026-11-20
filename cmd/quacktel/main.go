@@ -37,6 +37,7 @@ type cli struct {
 	Version versionCmd `cmd:"" help:"Print version information."`
 	Serve   serveCmd   `cmd:"" help:"Run the OTLP receiver and write logs to Parquet."`
 	Query   queryCmd   `cmd:"" help:"Run a read-only SQL query over stored telemetry."`
+	MCP     mcpCmd     `cmd:"" name:"mcp" help:"Serve stored telemetry to agents over MCP on stdio."`
 }
 
 type versionCmd struct{}
