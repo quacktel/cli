@@ -402,8 +402,10 @@ Defaults shared by the typed tools:
   attributes) and is capped at 500. A capped result sets `truncated`.
 - **Response budget:** each result is capped at 40,000 JSON characters, to stay
   under Claude Code's 25k-token MCP output cap. Rows that would exceed it are
-  dropped and `truncated` is set. `get_trace` shares one budget across spans
-  and logs, spans first.
+  dropped, `truncated` is set, and `note` adds a size-cap sentence so agents
+  narrow the query instead of raising `limit`. `get_trace` shares one budget
+  across spans and logs, spans first. `describe_schema` examples are cut at 200
+  characters.
 - **Truncation:** strings longer than 2000 characters are cut and marked
   `…[truncated N chars]`, and `truncated` is set.
 - **Untrusted data:** every result carries a `note` saying the content is

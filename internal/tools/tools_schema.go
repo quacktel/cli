@@ -78,7 +78,7 @@ func (r *Runner) DescribeSchema(ctx context.Context, in DescribeSchemaInput) (Sc
 			n, _ := row[1].(int64)
 			ex, _ := row[2].(string)
 			sig.dst.TopAttributeKeys = append(sig.dst.TopAttributeKeys, AttributeKey{
-				Key: truncateString(k, &out.Truncated), Count: n, Example: truncateString(ex, &out.Truncated),
+				Key: truncateString(k, maxStringLen, &out.Truncated), Count: n, Example: truncateString(ex, maxExampleLen, &out.Truncated),
 			})
 		}
 	}

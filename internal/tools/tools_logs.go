@@ -37,7 +37,6 @@ SELECT service_name, 0 AS logs, 1 AS spans, start_time AS ts FROM spans WHERE st
 
 type SearchLogsInput struct {
 	Common
-	// Shadows Common.Limit so the schema documents search_logs' lower default.
 	Limit       int               `json:"limit,omitempty" jsonschema:"Maximum rows to return. Defaults to 20, capped at 500."`
 	MinSeverity string            `json:"min_severity,omitempty" jsonschema:"Minimum severity: a number 1-24 or one of trace, debug, info, warn, error, fatal."`
 	Text        string            `json:"text,omitempty" jsonschema:"Case-insensitive substring of the log body."`
@@ -126,6 +125,7 @@ var (
 
 type FindSpansInput struct {
 	Common
+	Limit         int               `json:"limit,omitempty" jsonschema:"Maximum rows to return. Defaults to 100, capped at 500."`
 	Name          string            `json:"name,omitempty" jsonschema:"Case-insensitive substring of the span name."`
 	Kind          string            `json:"kind,omitempty" jsonschema:"Span kind: internal, server, client, producer, consumer or unspecified."`
 	Status        string            `json:"status,omitempty" jsonschema:"Span status: unset, ok or error."`

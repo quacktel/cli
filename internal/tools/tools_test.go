@@ -181,6 +181,7 @@ func TestSearchLogsLimit(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, rows.Rows, 2)
 	require.True(t, rows.Truncated)
+	require.NotContains(t, rows.Note, "size cap")
 
 	for _, limit := range []int{0, -5, 10_000} {
 		rows, err = r.SearchLogs(t.Context(), tools.SearchLogsInput{Limit: limit})
@@ -195,6 +196,7 @@ func TestSearchLogsDefaultLimit(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, rows.Rows, 20)
 	require.True(t, rows.Truncated)
+	require.NotContains(t, rows.Note, "size cap")
 
 	rows, err = r.SearchLogs(t.Context(), tools.SearchLogsInput{Limit: 30})
 	require.NoError(t, err)
@@ -208,6 +210,8 @@ func TestResultBudget(t *testing.T) {
 	require.True(t, rows.Truncated)
 	require.NotEmpty(t, rows.Rows)
 	require.Less(t, len(rows.Rows), 500)
+	require.Contains(t, rows.Note, "untrusted")
+	require.Contains(t, rows.Note, "size cap")
 	b, err := json.Marshal(rows.Rows)
 	require.NoError(t, err)
 	require.LessOrEqual(t, len(b), 40000)
@@ -233,6 +237,24 @@ func TestDescribeSchemaEventName(t *testing.T) {
 	require.NoError(t, err)
 	require.Empty(t, out.Logs.TopAttributeKeys)
 	require.NotEmpty(t, out.Spans.TopAttributeKeys)
+}
+
+func TestDescribeSchemaBudget(t *testing.T) {
+	r := newRunner(t, "")
+	out, err := r.DescribeSchema(t.Context(), tools.DescribeSchemaInput{})
+	require.NoError(t, err)
+	var blob *tools.AttributeKey
+	for _, k := range out.Logs.TopAttributeKeys {
+		if k.Key == "blob" {
+			blob = &k
+		}
+	}
+	require.NotNil(t, blob)
+	require.True(t, out.Truncated)
+	require.Equal(t, 200+utf8.RuneCountInString("…[truncated 4800 chars]"), utf8.RuneCountInString(blob.Example))
+	b, err := json.Marshal(out)
+	require.NoError(t, err)
+	require.Less(t, len(b), 10000)
 }
 
 func TestLimitDefaultAndClamp(t *testing.T) {

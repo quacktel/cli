@@ -19,6 +19,7 @@ const (
 	TraceID      = "0102030405060708090a0b0c0d0e0f10"
 	OtherTraceID = "ffffffffffffffffffffffffffffffff"
 	LongBodyLen  = 2500
+	LongAttrLen  = 5000
 )
 
 var Now = time.Date(2026, 6, 15, 12, 0, 0, 0, time.UTC)
@@ -142,7 +143,8 @@ func fixture(t *testing.T, bulk int) string {
 		{at: -time.Hour, sev: plog.SeverityNumberInfo, sevText: "INFO", body: "ran tool bash", event: "tool.call", session: "s1",
 			attrs: map[string]string{"tool": "bash", "odd'key": "v"}},
 		{at: -30 * time.Minute, sev: plog.SeverityNumberError, sevText: "ERROR", body: "failure: code=E42 boom", attrs: map[string]string{"tool": "read"}},
-		{at: -20 * time.Minute, sev: plog.SeverityNumberDebug, sevText: "DEBUG", body: "debug noise"},
+		{at: -20 * time.Minute, sev: plog.SeverityNumberDebug, sevText: "DEBUG", body: "debug noise",
+			attrs: map[string]string{"blob": strings.Repeat("y", LongAttrLen)}},
 		{at: -10 * time.Minute, sev: plog.SeverityNumberInfo, sevText: "INFO", body: strings.Repeat("x", LongBodyLen)},
 		{at: -5 * time.Minute, sev: plog.SeverityNumberWarn, sevText: "WARN", body: "retrying", trace: traceBytes, span: childID, hasTrace: true},
 		{at: -30 * time.Hour, sev: plog.SeverityNumberInfo, sevText: "INFO", body: "ancient"},

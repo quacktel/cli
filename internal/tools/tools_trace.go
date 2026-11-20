@@ -60,7 +60,12 @@ func (r *Runner) GetTrace(ctx context.Context, in GetTraceInput) (TraceOutput, e
 		}
 	}
 
-	return TraceOutput{Spans: spans.Rows, Logs: logs.Rows, Truncated: spans.Truncated || logs.Truncated, Note: untrustedNote}, nil
+	note := untrustedNote
+	if spans.Note != untrustedNote || logs.Note != untrustedNote {
+		note += sizeCapNote
+	}
+
+	return TraceOutput{Spans: spans.Rows, Logs: logs.Rows, Truncated: spans.Truncated || logs.Truncated, Note: note}, nil
 }
 
 func addDepths(spans []map[string]any) {

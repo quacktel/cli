@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"io/fs"
 	"path/filepath"
+	"regexp"
 	"slices"
 	"testing"
 	"time"
@@ -174,6 +175,32 @@ func TestSQLDescriptionHasNoWindow(t *testing.T) {
 			require.NoError(t, err)
 			require.Contains(t, string(b), "Defaults to 20")
 			require.NotContains(t, string(b), "Defaults to 100")
+		}
+	}
+}
+
+func TestSQLDescriptionListsEveryColumn(t *testing.T) {
+	cs := connect(t, toolstest.Fixture(t), "", true)
+	var desc string
+	tl, err := cs.ListTools(t.Context(), nil)
+	require.NoError(t, err)
+	for _, tool := range tl.Tools {
+		if tool.Name == "sql" {
+			desc = tool.Description
+		}
+	}
+	require.NotEmpty(t, desc)
+
+	for _, view := range []string{"logs", "spans"} {
+		res := call(t, cs, "sql", map[string]any{"query": "SELECT column_name FROM (DESCRIBE " + view + ")"})
+		require.False(t, res.IsError, text(t, res))
+		rows := res.StructuredContent.(map[string]any)["rows"].([]any)
+		require.NotEmpty(t, rows)
+		for _, row := range rows {
+			name := row.(map[string]any)["column_name"].(string)
+			// Names are listed as "name," or "name)" or "name MAP"; a bare substring would match prefixes such as time in start_time.
+			re := regexp.MustCompile(`[(, ]` + regexp.QuoteMeta(name) + `[,) ]`)
+			require.Regexp(t, re, desc, "%s column %s", view, name)
 		}
 	}
 }
