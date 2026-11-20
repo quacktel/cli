@@ -1,0 +1,8 @@
+pre-commit:
+  commands:
+    tidy:
+      glob: "*.{go,mod,sum}"
+      run: mise run check:tidy
+    lint:
+      glob: "*.go"
+      run: mise run check:lint

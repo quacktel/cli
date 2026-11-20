@@ -1,0 +1,32 @@
+steps:
+  - group: ":mag: QA"
+    key: quality_checks
+    steps:
+      - label: ":golangci-lint: lint"
+        agents:
+          queue: macos-medium
+        retry:
+          automatic:
+            # mise-cache exits 75 when GitHub downloads fail.
+            - exit_status: 75
+              limit: 2
+        commands:
+          - mise run check:tidy
+          - mise run check:lint
+        plugins:
+          - ./.buildkite/plugins/mise-cache: ~
+          - ./.buildkite/plugins/go-cache:
+              name: go_lint
+
+      - label: ":go: test"
+        agents:
+          queue: macos-medium
+        retry:
+          automatic:
+            - exit_status: 75
+              limit: 2
+        command: go test -race -count=1 ./...
+        plugins:
+          - ./.buildkite/plugins/mise-cache: ~
+          - ./.buildkite/plugins/go-cache:
+              name: go_test

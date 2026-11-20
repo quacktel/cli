@@ -27,7 +27,17 @@ Until 1.0, this repo uses trunk-based development: commit directly to `main`, wi
 
 ## Verification
 
-Stub: no code yet. M0 adds the fast-loop and before-finishing commands here.
+Fast loop: `go test ./...`
+
+Before finishing, after your last edit:
+
+```sh
+go vet ./... && go test -race -count=1 ./...
+mise exec -- golangci-lint run ./...
+mise run check:tidy
+```
+
+The `cmd/quacktel` tests build and run the real binary.
 
 ## Guiding principles
 

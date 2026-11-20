@@ -1,0 +1,82 @@
+version: "2"
+linters:
+  default: none
+  enable:
+    - bodyclose
+    - depguard
+    - durationcheck
+    - errcheck
+    - errorlint
+    - exhaustive
+    - forbidigo
+    - gocognit
+    - gocritic
+    - gosec
+    - govet
+    - ineffassign
+    - intrange
+    - misspell
+    - modernize
+    - nilerr
+    - noctx
+    - nolintlint
+    - revive
+    - rowserrcheck
+    - sqlclosecheck
+    - staticcheck
+    - testifylint
+    - thelper
+    - unconvert
+    - unparam
+    - unused
+    - usetesting
+  settings:
+    depguard:
+      rules:
+        testify:
+          deny:
+            - pkg: github.com/stretchr/testify/assert
+              desc: use testify/require so tests fail fast
+    exhaustive:
+      default-signifies-exhaustive: true
+    forbidigo:
+      forbid:
+        - pattern: ^slog\.(Default|Debug|Info|Warn|Error)(Context)?$
+          msg: pass the logger via Globals.Logger
+    gocognit:
+      min-complexity: 25
+    nolintlint:
+      require-explanation: true
+      require-specific: true
+    revive:
+      rules:
+        - name: context-as-argument
+          arguments:
+            - allow-types-before: "*testing.T"
+        - name: redefines-builtin-id
+        - name: unused-parameter
+  exclusions:
+    presets:
+      - std-error-handling
+    rules:
+      - path: _test\.go
+        linters: [gosec, noctx]
+formatters:
+  enable:
+    - gci
+    - gofmt
+  settings:
+    gci:
+      sections:
+        - standard
+        - default
+        - localmodule
+    gofmt:
+      rewrite-rules:
+        - pattern: "interface{}"
+          replacement: "any"
+        - pattern: "a[b:len(a)]"
+          replacement: "a[b:]"
+issues:
+  max-issues-per-linter: 0
+  max-same-issues: 0
