@@ -9,10 +9,15 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/alecthomas/kong"
+
 	"github.com/quacktel/cli/internal/paths"
+	"github.com/quacktel/cli/internal/service"
 )
 
 type envCmd struct {
+	serviceLabel
+
 	Listen     string `help:"OTLP/HTTP address the receiver listens on." default:"${listen}"`
 	ClaudeCode bool   `name:"claude-code" help:"Also enable Claude Code telemetry."`
 	Auth       bool   `help:"Also export the bearer token from <data-dir>/otlp-headers."`
@@ -21,7 +26,7 @@ type envCmd struct {
 	Service    string `help:"With --mcp, restrict the MCP server to one service's data."`
 }
 
-func (c *envCmd) Run(w io.Writer) error {
+func (c *envCmd) Run(w io.Writer, kctx *kong.Context) error {
 	if c.MCP {
 		return c.printMCP(w)
 	}
@@ -37,7 +42,7 @@ func (c *envCmd) Run(w io.Writer) error {
 		lines = append(lines, "export CLAUDE_CODE_ENABLE_TELEMETRY=1")
 	}
 	if c.Auth {
-		header, err := c.authHeader()
+		header, err := c.authHeader(kctx)
 		if err != nil {
 			return err
 		}
@@ -48,8 +53,21 @@ func (c *envCmd) Run(w io.Writer) error {
 	return err
 }
 
-func (c *envCmd) authHeader() (string, error) {
+func (c *envCmd) authHeader(kctx *kong.Context) (string, error) {
 	dir := c.DataDir
+	if !explicitFlags(kctx)["data-dir"] {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return "", fmt.Errorf("failed to find the home directory: %w", err)
+		}
+		rec, ok, err := recordedServe(&service.Manager{Label: c.Label, Home: home})
+		if err != nil {
+			return "", err
+		}
+		if ok && rec.DataDir != "" {
+			dir = rec.DataDir
+		}
+	}
 	if dir == "" {
 		var err error
 		if dir, err = paths.DataDir(); err != nil {

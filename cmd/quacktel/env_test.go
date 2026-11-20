@@ -7,6 +7,8 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/require"
+
+	"github.com/quacktel/cli/internal/service"
 )
 
 const envDefault = `export OTEL_EXPORTER_OTLP_ENDPOINT=http://127.0.0.1:4318
@@ -71,4 +73,33 @@ func TestEnvAuth(t *testing.T) {
 	out, err := runBin(t, "env", "--auth", "--data-dir", dir)
 	require.NoError(t, err)
 	require.Equal(t, envDefault+"export OTEL_EXPORTER_OTLP_HEADERS='authorization=Bearer "+token+"'\n", out)
+}
+
+func TestEnvAuthReadsInstalledServiceDataDir(t *testing.T) {
+	home := t.TempDir()
+	dir := dataDir(t)
+	other := dataDir(t)
+	label := randomLabel(t)
+	const tokenA = "authorization=Bearer aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	const tokenB = "authorization=Bearer bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+	require.NoError(t, os.WriteFile(filepath.Join(dir, otlpHeadersFile), []byte(tokenA+"\n"), 0o600))
+	require.NoError(t, os.WriteFile(filepath.Join(other, otlpHeadersFile), []byte(tokenB+"\n"), 0o600))
+
+	m := &service.Manager{Label: label, Home: home}
+	data, err := service.Render(service.Plist{
+		Label:            label,
+		ProgramArguments: []string{"/nonexistent/quacktel", "serve", "--auth", "--data-dir", dir},
+		LogPath:          filepath.Join(home, "launchd.log"),
+	})
+	require.NoError(t, err)
+	require.NoError(t, os.MkdirAll(filepath.Dir(m.PlistPath()), 0o755))
+	require.NoError(t, os.WriteFile(m.PlistPath(), data, 0o644))
+
+	out, stderr, err := runBinHome(t, home, "env", "--auth", "--label", label)
+	require.NoError(t, err, stderr)
+	require.Contains(t, out, "OTEL_EXPORTER_OTLP_HEADERS='"+tokenA+"'")
+
+	out, stderr, err = runBinHome(t, home, "env", "--auth", "--label", label, "--data-dir", other)
+	require.NoError(t, err, stderr)
+	require.Contains(t, out, "OTEL_EXPORTER_OTLP_HEADERS='"+tokenB+"'")
 }

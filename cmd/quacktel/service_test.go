@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"testing"
@@ -102,7 +103,9 @@ func TestServiceLaunchdReal(t *testing.T) {
 
 	addr := freeAddr(t)
 	dir := dataDir(t)
-	stdout, stderr, err := runBinHome(t, home, "service", "install", "--label", label, "--", "--data-dir", dir, "--listen", addr)
+	// The test binary lives in a temp dir, which install refuses without the escape hatch.
+	installArgs := []string{"service", "install", "--label", label, "--allow-temp-binary", "--", "--data-dir", dir, "--listen", addr}
+	stdout, stderr, err := runBinHome(t, home, installArgs...)
 	require.NoError(t, err, stderr)
 	require.Contains(t, stdout, plist)
 
@@ -115,11 +118,24 @@ func TestServiceLaunchdReal(t *testing.T) {
 
 		return true
 	}
-	deadline := time.Now().Add(15 * time.Second)
-	for !dial() {
-		require.True(t, time.Now().Before(deadline), "service did not start listening on %s", addr)
-		time.Sleep(100 * time.Millisecond)
+	waitServing := func() {
+		deadline := time.Now().Add(15 * time.Second)
+		for !dial() {
+			require.True(t, time.Now().Before(deadline), "service did not start listening on %s", addr)
+			time.Sleep(100 * time.Millisecond)
+		}
 	}
+	pidRe := regexp.MustCompile(`(?m)^pid: (\d+)$`)
+	pid := func() string {
+		out, stderr, err := runBinHome(t, home, "service", "status", "--label", label)
+		require.NoError(t, err, stderr)
+		m := pidRe.FindStringSubmatch(out)
+		require.NotNil(t, m, out)
+
+		return m[1]
+	}
+	waitServing()
+	oldPID := pid()
 
 	fixture, err := os.ReadFile(filepath.Join("..", "..", "testdata", "claude_code_logs.json"))
 	require.NoError(t, err)
@@ -128,14 +144,42 @@ func TestServiceLaunchdReal(t *testing.T) {
 	auth := strings.TrimPrefix(strings.TrimSpace(string(headers)), "authorization=")
 	require.Equal(t, http.StatusOK, post(t, "http://"+addr+"/v1/logs", "application/json", fixture, "Authorization", auth))
 
+	// Reinstalling a running job must upgrade it in place: launchd fails bootstrap until the old job is gone.
+	_, stderr, err = runBinHome(t, home, installArgs...)
+	require.NoError(t, err, stderr)
+	waitServing()
+	newPID := pid()
+	require.NotEqual(t, oldPID, newPID)
+	t.Logf("reinstall: old pid %s, new pid %s", oldPID, newPID)
+
 	_, stderr, err = runBinHome(t, home, "service", "uninstall", "--label", label)
 	require.NoError(t, err, stderr)
 	_, err = os.Stat(plist)
 	require.ErrorIs(t, err, fs.ErrNotExist)
 
-	deadline = time.Now().Add(10 * time.Second)
+	deadline := time.Now().Add(10 * time.Second)
 	for dial() {
 		require.True(t, time.Now().Before(deadline), "port %s still open after uninstall", addr)
 		time.Sleep(100 * time.Millisecond)
 	}
+}
+
+func TestIsTempBinary(t *testing.T) {
+	tmp, err := filepath.EvalSymlinks(t.TempDir())
+	require.NoError(t, err)
+	require.True(t, isTempBinary(filepath.Join(tmp, "x", "quacktel"), tmp))
+	require.True(t, isTempBinary("/home/u/.cache/go-build/ab/quacktel", tmp))
+	require.False(t, isTempBinary("/usr/local/bin/quacktel", tmp))
+	require.False(t, isTempBinary(tmp+"-sibling/quacktel", tmp))
+}
+
+func TestServiceInstallRefusesTempBinary(t *testing.T) {
+	home := t.TempDir()
+	_, stderr, err := runBinHome(t, home, "service", "install", "--label", randomLabel(t))
+	require.Error(t, err)
+	require.Contains(t, stderr, "refusing to install a temporary binary")
+	require.Contains(t, stderr, "mise run install")
+
+	_, err = os.Stat(filepath.Join(home, "Library", "LaunchAgents"))
+	require.ErrorIs(t, err, fs.ErrNotExist)
 }

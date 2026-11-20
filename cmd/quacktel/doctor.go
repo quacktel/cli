@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"slices"
 	"text/tabwriter"
 
 	"github.com/alecthomas/kong"
@@ -38,22 +37,12 @@ func (c *doctorCmd) Run(ctx context.Context, kctx *kong.Context, w io.Writer) er
 	}
 	m := &service.Manager{Label: c.Label, Home: home, UID: os.Getuid()}
 
-	explicit := map[string]bool{}
-	for _, p := range kctx.Path {
-		if p.Flag != nil {
-			explicit[p.Flag.Name] = true
-		}
+	explicit := explicitFlags(kctx)
+	rec, ok, err := recordedServe(m)
+	if err != nil {
+		return err
 	}
-	if p, err := service.ReadPlist(m.PlistPath()); err == nil {
-		// Recorded args are validated the same way install validated them.
-		i := slices.Index(p.ProgramArguments, "serve")
-		if i < 0 {
-			return fmt.Errorf("%s records no serve command", m.PlistPath())
-		}
-		rec, err := parseServeArgs(p.ProgramArguments[i+1:])
-		if err != nil {
-			return fmt.Errorf("invalid recorded arguments in %s: %w", m.PlistPath(), err)
-		}
+	if ok {
 		if !explicit["data-dir"] && rec.DataDir != "" {
 			c.DataDir = rec.DataDir
 		}
@@ -63,8 +52,6 @@ func (c *doctorCmd) Run(ctx context.Context, kctx *kong.Context, w io.Writer) er
 		if !explicit["max-disk"] {
 			c.MaxDisk = rec.MaxDisk
 		}
-	} else if !errors.Is(err, os.ErrNotExist) {
-		return err
 	}
 	if c.DataDir == "" {
 		if c.DataDir, err = paths.DataDir(); err != nil {

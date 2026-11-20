@@ -1,6 +1,7 @@
 package logfile
 
 import (
+	"bytes"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -136,5 +137,35 @@ func TestCloseIdempotent(t *testing.T) {
 	w, err := Open(newPath(t), 100, 2)
 	require.NoError(t, err)
 	require.NoError(t, w.Close())
+	require.NoError(t, w.Close())
+}
+
+func TestFailedRotationFallsBackThenRecovers(t *testing.T) {
+	path := newPath(t)
+	dir := filepath.Dir(path)
+	w, err := Open(path, 20, 2)
+	require.NoError(t, err)
+	var fb bytes.Buffer
+	w.(*writer).fallback = &fb
+
+	_, err = w.Write([]byte("0123456789\n"))
+	require.NoError(t, err)
+
+	require.NoError(t, os.RemoveAll(dir))
+	require.NoError(t, os.WriteFile(dir, nil, 0o600))
+
+	for _, s := range []string{"aaaaaaaaaa\n", "bbbbbbbbbb\n"} {
+		n, err := w.Write([]byte(s))
+		require.NoError(t, err)
+		require.Len(t, s, n)
+	}
+	require.Equal(t, "aaaaaaaaaa\nbbbbbbbbbb\n", fb.String())
+
+	require.NoError(t, os.Remove(dir))
+	require.NoError(t, os.Mkdir(dir, 0o700))
+	_, err = w.Write([]byte("cccccccccc\n"))
+	require.NoError(t, err)
+	require.Equal(t, "cccccccccc\n", read(t, path))
+	require.Equal(t, "aaaaaaaaaa\nbbbbbbbbbb\n", fb.String())
 	require.NoError(t, w.Close())
 }

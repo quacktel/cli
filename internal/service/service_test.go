@@ -8,6 +8,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 )
@@ -17,7 +18,13 @@ type fakeRunner struct {
 	calls []string
 	// reply maps a launchctl verb to its canned output and error.
 	reply map[string]fakeReply
+	// seq overrides reply: replies are consumed in order and the last repeats.
+	seq map[string][]fakeReply
 }
+
+const goneOut = `Could not find service "dev.quacktel.test" in domain for user gui: 501`
+
+var errGone = errors.New("exit status 113")
 
 type fakeReply struct {
 	out string
@@ -29,6 +36,12 @@ func (f *fakeRunner) run(_ context.Context, args ...string) ([]byte, error) {
 	defer f.mu.Unlock()
 	f.calls = append(f.calls, strings.Join(args, " "))
 	r := f.reply[args[0]]
+	if q := f.seq[args[0]]; len(q) > 0 {
+		r = q[0]
+		if len(q) > 1 {
+			f.seq[args[0]] = q[1:]
+		}
+	}
 
 	return []byte(r.out), r.err
 }
@@ -36,7 +49,17 @@ func (f *fakeRunner) run(_ context.Context, args ...string) ([]byte, error) {
 func newManager(t *testing.T, f *fakeRunner) *Manager {
 	t.Helper()
 
-	return &Manager{Label: "dev.quacktel.test", Home: t.TempDir(), UID: 501, Run: f.run}
+	if _, ok := f.reply["print"]; !ok && f.seq["print"] == nil {
+		if f.reply == nil {
+			f.reply = map[string]fakeReply{}
+		}
+		f.reply["print"] = fakeReply{out: goneOut, err: errGone}
+	}
+
+	return &Manager{
+		Label: "dev.quacktel.test", Home: t.TempDir(), UID: 501, Run: f.run,
+		pollInterval: time.Millisecond, waitTimeout: 200 * time.Millisecond, retryBackoff: time.Millisecond,
+	}
 }
 
 func TestRenderEscapesAndRoundTrips(t *testing.T) {
@@ -81,6 +104,7 @@ func TestInstall(t *testing.T) {
 	require.Equal(t, os.FileMode(0o700), logInfo.Mode().Perm())
 	require.Equal(t, []string{
 		"bootout gui/501/dev.quacktel.test",
+		"print gui/501/dev.quacktel.test",
 		"bootstrap gui/501 " + m.PlistPath(),
 	}, f.calls)
 
@@ -89,8 +113,8 @@ func TestInstall(t *testing.T) {
 	p, err := ReadPlist(m.PlistPath())
 	require.NoError(t, err)
 	require.Equal(t, []string{"/bin/q", "serve", "--retention", "24h"}, p.ProgramArguments)
-	require.Len(t, f.calls, 4)
-	require.Equal(t, "bootout gui/501/dev.quacktel.test", f.calls[2])
+	require.Len(t, f.calls, 6)
+	require.Equal(t, "bootout gui/501/dev.quacktel.test", f.calls[3])
 
 	entries, err := os.ReadDir(filepath.Dir(m.PlistPath()))
 	require.NoError(t, err)
@@ -104,6 +128,82 @@ func TestInstallBootstrapFailure(t *testing.T) {
 	m := newManager(t, f)
 	err := m.Install(t.Context(), []string{"/bin/q"})
 	require.ErrorContains(t, err, "Input/output error")
+}
+
+func TestInstallWaitsForUnload(t *testing.T) {
+	loaded := fakeReply{out: printSample}
+	f := &fakeRunner{seq: map[string][]fakeReply{
+		"print": {loaded, loaded, {out: goneOut, err: errGone}},
+	}}
+	m := newManager(t, f)
+	require.NoError(t, m.Install(t.Context(), []string{"/bin/q"}))
+	require.Equal(t, []string{
+		"bootout gui/501/dev.quacktel.test",
+		"print gui/501/dev.quacktel.test",
+		"print gui/501/dev.quacktel.test",
+		"print gui/501/dev.quacktel.test",
+		"bootstrap gui/501 " + m.PlistPath(),
+	}, f.calls)
+}
+
+func TestInstallRetriesBootstrapStatus5(t *testing.T) {
+	f := &fakeRunner{seq: map[string][]fakeReply{
+		"bootstrap": {{out: "Bootstrap failed: 5: Input/output error", err: errors.New("exit status 5")}, {}},
+	}}
+	m := newManager(t, f)
+	require.NoError(t, m.Install(t.Context(), []string{"/bin/q"}))
+	require.Equal(t, 2, countCalls(f, "bootstrap"))
+}
+
+func TestInstallBootstrapPersistentFailureRetriesThenErrors(t *testing.T) {
+	f := &fakeRunner{reply: map[string]fakeReply{
+		"bootstrap": {out: "Bootstrap failed: 5: Input/output error", err: errors.New("exit status 5")},
+	}}
+	m := newManager(t, f)
+	err := m.Install(t.Context(), []string{"/bin/q"})
+	require.ErrorContains(t, err, "Bootstrap failed: 5")
+	require.Equal(t, 5, countCalls(f, "bootstrap"))
+}
+
+func TestInstallOtherBootstrapErrorIsNotRetried(t *testing.T) {
+	f := &fakeRunner{reply: map[string]fakeReply{
+		"bootstrap": {out: "boom", err: errors.New("exit status 1")},
+	}}
+	m := newManager(t, f)
+	require.ErrorContains(t, m.Install(t.Context(), []string{"/bin/q"}), "boom")
+	require.Equal(t, 1, countCalls(f, "bootstrap"))
+}
+
+func TestInstallWaitDeadline(t *testing.T) {
+	f := &fakeRunner{reply: map[string]fakeReply{"print": {out: printSample}}}
+	m := newManager(t, f)
+	err := m.Install(t.Context(), []string{"/bin/q"})
+	require.ErrorContains(t, err, "waiting for dev.quacktel.test to unload")
+	require.Zero(t, countCalls(f, "bootstrap"))
+}
+
+func TestUninstallWaitsForUnload(t *testing.T) {
+	f := &fakeRunner{seq: map[string][]fakeReply{
+		"print": {{out: printSample}, {out: goneOut, err: errGone}},
+	}}
+	m := newManager(t, f)
+	require.NoError(t, m.Uninstall(t.Context()))
+	require.Equal(t, 2, countCalls(f, "print"))
+
+	f = &fakeRunner{reply: map[string]fakeReply{"print": {out: printSample}}}
+	m = newManager(t, f)
+	require.ErrorContains(t, m.Uninstall(t.Context()), "to unload")
+}
+
+func countCalls(f *fakeRunner, verb string) int {
+	n := 0
+	for _, c := range f.calls {
+		if strings.HasPrefix(c, verb+" ") {
+			n++
+		}
+	}
+
+	return n
 }
 
 func TestUninstall(t *testing.T) {
@@ -154,7 +254,10 @@ const printSample = `gui/501/dev.quacktel.serve = {
 func TestStatus(t *testing.T) {
 	f := &fakeRunner{reply: map[string]fakeReply{"print": {out: printSample}}}
 	m := newManager(t, f)
-	require.NoError(t, m.Install(t.Context(), []string{"/bin/q", "serve"}))
+	data, err := Render(Plist{Label: m.Label, ProgramArguments: []string{"/bin/q", "serve"}, LogPath: "/tmp/l"})
+	require.NoError(t, err)
+	require.NoError(t, os.MkdirAll(filepath.Dir(m.PlistPath()), 0o755))
+	require.NoError(t, os.WriteFile(m.PlistPath(), data, 0o600))
 
 	st, err := m.Status(t.Context())
 	require.NoError(t, err)

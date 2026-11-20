@@ -453,10 +453,17 @@ It uses the same connection and guardrails as `sql`.
   `Render` rewrites them.
 - **Domain:** the agent loads into `gui/<uid>`.
   - `install` writes the plist, runs `bootout` (ignoring failure, so a stale
-    loaded copy doesn't block it), then `bootstrap`. Running it again upgrades
-    the agent in place.
+    loaded copy doesn't block it), waits until `launchctl print` reports the job
+    gone (polling every 100ms, up to 10s), then runs `bootstrap`. launchd fails
+    `bootstrap` with status 5 while it is still tearing a running job down, so
+    `bootstrap` is also retried up to 5 times with backoff, only on status 5.
+    Running it again upgrades the agent in place.
+  - `install` refuses a binary under the OS temp dir or a `go-build` path (for
+    example from `go run`), because the agent would crash-loop once it is
+    deleted. The hidden `--allow-temp-binary` flag is for tests.
   - `restart` runs `kickstart -k`, which is needed after rebuilding the binary.
-  - `uninstall` runs `bootout` and removes the plist.
+  - `uninstall` runs `bootout`, waits for the job to be gone like `install`, and
+    removes the plist.
   - `status` parses `launchctl print`.
 - **Passthrough:** flags after `--` go to `serve`. They are checked up front by
   parsing them into `serveCmd`, running `validate()` and `receiver.CheckAddr`,
@@ -465,7 +472,8 @@ It uses the same connection and guardrails as `sql`.
   `--data-dir` is recorded as an absolute path, because launchd runs with cwd `/`.
 - **Logs:** `--log-file` writes `serve.log` rotated at 10 MiB, keeping 3 old
   files. launchd's own capture (`launchd.log`) holds crashes that happen before
-  the logger starts.
+  the logger starts. If rotation can't reopen the file, writes fall back to
+  stderr (so into `launchd.log`) and the next write retries the file.
 - **Linux (M7):** `service install` writes a `systemd --user` unit to
   `~/.config/systemd/user/quacktel.service` and enables it. The .deb/.rpm
   packages ship the unit in `/usr/lib/systemd/user/` but don't enable it.
@@ -508,8 +516,10 @@ export OTEL_METRICS_EXPORTER=none
 
 - `--claude-code` adds `export CLAUDE_CODE_ENABLE_TELEMETRY=1`.
 - `--auth` adds `export OTEL_EXPORTER_OTLP_HEADERS='authorization=Bearer <token>'`,
-  read from `<data-dir>/otlp-headers` (so it prints the token, on request). It
-  fails if the file doesn't exist; run `quacktel serve --auth` first.
+  read from `<data-dir>/otlp-headers` (so it prints the token, on request). Like
+  `doctor`, it uses the installed agent's recorded `--data-dir` unless
+  `--data-dir` is given. It fails if the file doesn't exist; run
+  `quacktel serve --auth` first.
 - `--mcp` prints only an MCP server config, pretty-printed, with the absolute
   path of the running binary (symlinks resolved). `--service X` adds
   `"--service", "X"` to the args:

@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -39,6 +40,8 @@ func (l serviceLabel) manager(globals *Globals) (*service.Manager, error) {
 type serviceInstallCmd struct {
 	serviceLabel
 
+	AllowTempBinary bool `hidden:"" help:"Install even when the binary is in a temp dir; for tests."`
+
 	Args []string `arg:"" optional:"" passthrough:"" help:"Flags for quacktel serve, after --. The agent always runs with --auth."`
 }
 
@@ -65,6 +68,53 @@ func parseServeArgs(args []string) (serveCmd, error) {
 	}
 
 	return probe.Serve, nil
+}
+
+func explicitFlags(kctx *kong.Context) map[string]bool {
+	explicit := map[string]bool{}
+	for _, p := range kctx.Path {
+		if p.Flag != nil {
+			explicit[p.Flag.Name] = true
+		}
+	}
+
+	return explicit
+}
+
+// recordedServe parses the serve flags recorded in the installed plist; ok is false when none is installed.
+func recordedServe(m *service.Manager) (rec serveCmd, ok bool, err error) {
+	p, err := service.ReadPlist(m.PlistPath())
+	if errors.Is(err, os.ErrNotExist) {
+		return serveCmd{}, false, nil
+	}
+	if err != nil {
+		return serveCmd{}, false, err
+	}
+	// Recorded args are validated the same way install validated them.
+	i := slices.Index(p.ProgramArguments, "serve")
+	if i < 0 {
+		return serveCmd{}, false, fmt.Errorf("%s records no serve command", m.PlistPath())
+	}
+	rec, err = parseServeArgs(p.ProgramArguments[i+1:])
+	if err != nil {
+		return serveCmd{}, false, fmt.Errorf("invalid recorded arguments in %s: %w", m.PlistPath(), err)
+	}
+
+	return rec, true, nil
+}
+
+// isTempBinary reports whether exe lives where the OS or go run will delete it.
+func isTempBinary(exe, tmp string) bool {
+	exe = filepath.Clean(exe)
+	if r, err := filepath.EvalSymlinks(tmp); err == nil {
+		tmp = r
+	}
+	tmp = filepath.Clean(tmp)
+	if rel, err := filepath.Rel(tmp, exe); err == nil && rel != "." && !strings.HasPrefix(rel, "..") {
+		return true
+	}
+
+	return strings.Contains(exe, "/go-build")
 }
 
 func validateServeArgs(args []string) error {
@@ -104,6 +154,9 @@ func (c *serviceInstallCmd) Run(ctx context.Context, globals *Globals, w io.Writ
 	exe, err := executablePath()
 	if err != nil {
 		return err
+	}
+	if !c.AllowTempBinary && isTempBinary(exe, os.TempDir()) {
+		return fmt.Errorf("refusing to install a temporary binary (%s); install quacktel first, e.g. mise run install", exe)
 	}
 	m, err := c.manager(globals)
 	if err != nil {

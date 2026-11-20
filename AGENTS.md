@@ -65,6 +65,7 @@ The `cmd/quacktel` tests build and run the real binary. `examples/otel-go-app` i
 - Data files and directories are created `0600` and `0700`.
 - When auth is on, the token is never logged, and the headers file is 0600 and validated at startup.
 - The service plist is rendered through `encoding/xml` with self-closing booleans and written with mode 0644; tests only call launchctl through the injectable runner, except the opt-in `QUACKTEL_TEST_LAUNCHD=1` test.
+- After `launchctl bootout`, wait for the job to be gone before `bootstrap`; launchd fails with status 5 otherwise.
 - `doctor` never mutates state; the flock probe releases immediately.
 - Logs go to stderr and results go to stdout.
 - `quacktel mcp` writes only protocol to stdout; logs go to stderr.

@@ -11,6 +11,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"time"
 )
 
 // Runner runs launchctl with args and returns its combined output.
@@ -28,7 +29,19 @@ type Manager struct {
 	UID    int
 	Run    Runner
 	Logger *slog.Logger
+
+	// Timing overrides let tests run fast; zero values use the defaults.
+	pollInterval time.Duration
+	waitTimeout  time.Duration
+	retryBackoff time.Duration
 }
+
+const (
+	defaultPollInterval = 100 * time.Millisecond
+	defaultWaitTimeout  = 10 * time.Second
+	defaultRetryBackoff = 200 * time.Millisecond
+	bootstrapAttempts   = 5
+)
 
 // Status is what launchctl reports for the agent.
 type Status struct {
@@ -78,17 +91,37 @@ func (m *Manager) Install(ctx context.Context, args []string) error {
 		return err
 	}
 
-	m.bootout(ctx)
-	if out, err := m.run(ctx, "bootstrap", "gui/"+strconv.Itoa(m.UID), m.PlistPath()); err != nil {
-		return fmt.Errorf("failed to bootstrap %s: %w: %s", m.Label, err, strings.TrimSpace(string(out)))
+	if err := m.bootoutAndWait(ctx); err != nil {
+		return err
 	}
 
-	return nil
+	return m.bootstrap(ctx)
+}
+
+// bootstrap retries status 5 because launchd can still be tearing the old job down.
+func (m *Manager) bootstrap(ctx context.Context) error {
+	backoff := orDefault(m.retryBackoff, defaultRetryBackoff)
+	for attempt := 1; ; attempt++ {
+		out, err := m.run(ctx, "bootstrap", "gui/"+strconv.Itoa(m.UID), m.PlistPath())
+		if err == nil {
+			return nil
+		}
+		wrapped := fmt.Errorf("failed to bootstrap %s: %w: %s", m.Label, err, strings.TrimSpace(string(out)))
+		if attempt >= bootstrapAttempts || !bootstrapBusy.Match(out) {
+			return wrapped
+		}
+		if err := sleep(ctx, backoff); err != nil {
+			return errors.Join(wrapped, err)
+		}
+		backoff *= 2
+	}
 }
 
 // Uninstall unloads the agent and removes its plist.
 func (m *Manager) Uninstall(ctx context.Context) error {
-	m.bootout(ctx)
+	if err := m.bootoutAndWait(ctx); err != nil {
+		return err
+	}
 	if err := os.Remove(m.PlistPath()); err != nil && !errors.Is(err, os.ErrNotExist) {
 		return fmt.Errorf("failed to remove plist: %w", err)
 	}
@@ -107,6 +140,49 @@ func (m *Manager) bootout(ctx context.Context) {
 	}
 }
 
+// bootoutAndWait blocks until launchd has dropped the job, since bootstrap fails with status 5 while it lingers.
+func (m *Manager) bootoutAndWait(ctx context.Context) error {
+	m.bootout(ctx)
+
+	interval := orDefault(m.pollInterval, defaultPollInterval)
+	timeout := orDefault(m.waitTimeout, defaultWaitTimeout)
+	deadline := time.Now().Add(timeout)
+	for {
+		out, _ := m.run(ctx, "print", m.target())
+		if notLoaded.Match(out) {
+			return nil
+		}
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		if !time.Now().Before(deadline) {
+			return fmt.Errorf("timed out after %s waiting for %s to unload", timeout, m.Label)
+		}
+		if err := sleep(ctx, interval); err != nil {
+			return err
+		}
+	}
+}
+
+func orDefault(d, def time.Duration) time.Duration {
+	if d <= 0 {
+		return def
+	}
+
+	return d
+}
+
+func sleep(ctx context.Context, d time.Duration) error {
+	t := time.NewTimer(d)
+	defer t.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-t.C:
+		return nil
+	}
+}
+
 func (m *Manager) Restart(ctx context.Context) error {
 	if out, err := m.run(ctx, "kickstart", "-k", m.target()); err != nil {
 		return fmt.Errorf("failed to restart %s: %w: %s", m.Label, err, strings.TrimSpace(string(out)))
@@ -116,10 +192,11 @@ func (m *Manager) Restart(ctx context.Context) error {
 }
 
 var (
-	notLoaded  = regexp.MustCompile(`No such process|Could not find service`)
-	stateRe    = regexp.MustCompile(`(?m)^\s*state = (\S.*?)\s*$`)
-	pidRe      = regexp.MustCompile(`(?m)^\s*pid = (\d+)\s*$`)
-	lastExitRe = regexp.MustCompile(`(?m)^\s*last exit code = (-?\d+)\s*$`)
+	notLoaded     = regexp.MustCompile(`No such process|Could not find service`)
+	bootstrapBusy = regexp.MustCompile(`Bootstrap failed: 5|Input/output error`)
+	stateRe       = regexp.MustCompile(`(?m)^\s*state = (\S.*?)\s*$`)
+	pidRe         = regexp.MustCompile(`(?m)^\s*pid = (\d+)\s*$`)
+	lastExitRe    = regexp.MustCompile(`(?m)^\s*last exit code = (-?\d+)\s*$`)
 )
 
 func (m *Manager) Status(ctx context.Context) (Status, error) {
