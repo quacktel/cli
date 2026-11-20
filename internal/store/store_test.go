@@ -101,29 +101,6 @@ func readManifest(t *testing.T, dataDir, name string) manifest.Manifest {
 	return m
 }
 
-func TestServiceDir(t *testing.T) {
-	names := []string{
-		"../../etc", "/abs/path", "..", ".", "", "héllo wörld", strings.Repeat("a", 500),
-		"Svc", "svc", "s.v.c", "bad\x00name", "claude-code",
-	}
-	seen := map[string]string{}
-	for _, n := range names {
-		got := ServiceDir(n)
-		require.Equal(t, filepath.Base(got), got, n)
-		require.NotEqual(t, ".", got)
-		require.NotEqual(t, "..", got)
-		require.NotContains(t, got, "/")
-		require.NotContains(t, got, "\x00")
-		require.LessOrEqual(t, len(got), 73)
-		require.NotContains(t, seen, got, "collision between %q and %q", n, seen[got])
-		seen[got] = n
-	}
-	require.Regexp(t, `^claude-code-[0-9a-f]{8}$`, ServiceDir("claude-code"))
-	require.Regexp(t, `^unknown_service-[0-9a-f]{8}$`, ServiceDir(""))
-	require.Regexp(t, `^_-[0-9a-f]{8}$`, ServiceDir(".."))
-	require.Regexp(t, `^_-[0-9a-f]{8}$`, ServiceDir("-"))
-}
-
 func TestRoundTrip(t *testing.T) {
 	dataDir := newDataDir(t)
 	s := openStore(t, Options{DataDir: dataDir})

@@ -7,11 +7,13 @@ import (
 	"io"
 	"log/slog"
 	"os"
+	"path/filepath"
 	"text/tabwriter"
 
 	"golang.org/x/term"
 
 	"github.com/quacktel/cli/internal/engine"
+	"github.com/quacktel/cli/internal/manifest"
 	"github.com/quacktel/cli/internal/paths"
 )
 
@@ -21,6 +23,7 @@ type queryCmd struct {
 	DataDir string `help:"Data directory. Defaults to the per-user config dir." type:"path"`
 	Format  string `help:"Output format: auto is table on a terminal, JSON otherwise." enum:"auto,table,json" default:"auto"`
 	MaxRows int    `help:"Maximum rows to return." default:"1000"`
+	Service string `help:"Restrict the session to one service's data."`
 }
 
 func (c *queryCmd) Run(ctx context.Context, globals *Globals, w io.Writer) error {
@@ -35,7 +38,12 @@ func (c *queryCmd) Run(ctx context.Context, globals *Globals, w io.Writer) error
 		return err
 	}
 
-	e, err := engine.Open(ctx, engine.Options{AllowedDir: dir, DataDir: dir})
+	opts := engine.Options{AllowedDir: dir, DataDir: dir}
+	if c.Service != "" {
+		opts.Service = c.Service
+		opts.AllowedDir = filepath.Join(dir, "services", manifest.ServiceDir(c.Service))
+	}
+	e, err := engine.Open(ctx, opts)
 	if err != nil {
 		return fmt.Errorf("failed to open engine: %w", err)
 	}
@@ -93,6 +101,9 @@ func writeTable(w io.Writer, res engine.Result) error {
 		for i, v := range row {
 			if i > 0 {
 				fmt.Fprint(tw, "\t")
+			}
+			if v == nil {
+				continue
 			}
 			fmt.Fprint(tw, v)
 		}

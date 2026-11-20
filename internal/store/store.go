@@ -2,8 +2,6 @@ package store
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -40,8 +38,7 @@ const (
 	defaultRetention     = 720 * time.Hour
 	defaultMaxDiskBytes  = 10 << 30
 
-	maxSlugLen = 64
-	limitMsg   = "service limit reached"
+	limitMsg = "service limit reached"
 
 	signalLogs  = "logs"
 	signalSpans = "spans"
@@ -130,32 +127,8 @@ type Store struct {
 	capExceeded bool
 }
 
-var slugReplacer = func(r rune) rune {
-	switch {
-	case r >= 'a' && r <= 'z', r >= '0' && r <= '9', r == '.', r == '_', r == '-':
-		return r
-	}
-
-	return '_'
-}
-
-// ServiceDir keeps untrusted service names off the filesystem as paths; the hash separates names that slug alike.
-func ServiceDir(name string) string {
-	if name == "" {
-		name = "unknown_service"
-	}
-	slug := strings.TrimLeft(strings.Map(slugReplacer, strings.ToLower(name)), ".-")
-	if len(slug) > maxSlugLen {
-		slug = slug[:maxSlugLen]
-	}
-	// A leading '-' would read as a flag to shell tools, so an empty slug gets a placeholder.
-	if slug == "" {
-		slug = "_"
-	}
-	sum := sha256.Sum256([]byte(name))
-
-	return slug + "-" + hex.EncodeToString(sum[:])[:8]
-}
+// ServiceDir is the manifest package's mapping, aliased for brevity.
+var ServiceDir = manifest.ServiceDir
 
 func Open(ctx context.Context, opts Options) (*Store, error) {
 	if opts.MaxServices == 0 {

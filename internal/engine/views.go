@@ -37,6 +37,18 @@ func within(root, dir string) bool {
 	return rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
 }
 
+// scoped keeps only the service's own manifest; the name check guards against a manifest copied into the wrong directory.
+func scoped(loaded []manifest.Loaded, dir, service string) []manifest.Loaded {
+	var out []manifest.Loaded
+	for _, l := range loaded {
+		if l.Dir == dir && l.Manifest.ServiceName == service {
+			out = append(out, l)
+		}
+	}
+
+	return out
+}
+
 // fingerprint changes whenever a manifest is added, removed or rewritten.
 // Retention can remove a service between Glob and Stat, so a vanished manifest drops that service rather than failing the query.
 func fingerprint(loaded []manifest.Loaded) (string, []manifest.Loaded, error) {
@@ -69,6 +81,9 @@ func (e *Engine) refresh(ctx context.Context) error {
 	loaded, err := manifest.Glob(e.dataDir)
 	if err != nil {
 		return fmt.Errorf("failed to read manifests: %w", err)
+	}
+	if e.scopedDir != "" {
+		loaded = scoped(loaded, e.scopedDir, e.service)
 	}
 	fp, loaded, err := fingerprint(loaded)
 	if err != nil {

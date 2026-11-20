@@ -16,6 +16,7 @@ import (
 	"go.opentelemetry.io/collector/pdata/ptrace"
 
 	"github.com/quacktel/cli/internal/manifest"
+	"github.com/quacktel/cli/internal/store"
 	"github.com/quacktel/cli/internal/table"
 )
 
@@ -171,4 +172,71 @@ func TestOpenRejectsDataDirOutsideAllowedDir(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	_, err := Open(t.Context(), Options{AllowedDir: t.TempDir(), DataDir: t.TempDir()})
 	require.Error(t, err)
+}
+
+// writeStoreServices writes one real log record per service through the store.
+func writeStoreServices(t *testing.T, dataDir string, services ...string) {
+	t.Helper()
+
+	s, err := store.Open(t.Context(), store.Options{DataDir: dataDir})
+	require.NoError(t, err)
+	ld := plog.NewLogs()
+	for _, name := range services {
+		rl := ld.ResourceLogs().AppendEmpty()
+		rl.Resource().Attributes().PutStr("service.name", name)
+		rl.ScopeLogs().AppendEmpty().LogRecords().AppendEmpty().Body().SetStr(name)
+	}
+	_, _, err = s.AppendLogs(t.Context(), ld)
+	require.NoError(t, err)
+	require.NoError(t, s.Flush(t.Context()))
+	require.NoError(t, s.Close())
+}
+
+func openScoped(t *testing.T, dataDir, service string) *Engine {
+	t.Helper()
+
+	e, err := Open(t.Context(), Options{
+		AllowedDir: filepath.Join(dataDir, "services", manifest.ServiceDir(service)),
+		DataDir:    dataDir,
+		Service:    service,
+	})
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, e.Close()) })
+
+	return e
+}
+
+func TestScopedViewsOnlyServiceData(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	dir := t.TempDir()
+	require.NoError(t, os.Chmod(dir, 0o700))
+	writeStoreServices(t, dir, "alpha", "beta")
+	e := openScoped(t, dir, "alpha")
+
+	res, err := e.Query(t.Context(), "SELECT DISTINCT service_name FROM logs", 10)
+	require.NoError(t, err)
+	require.Equal(t, [][]any{{"alpha"}}, res.Rows)
+
+	res, err = e.Query(t.Context(), "SELECT count(*) FROM (DESCRIBE logs)", 10)
+	require.NoError(t, err)
+	require.Len(t, res.Rows, 1)
+
+	other, err := manifest.Read(filepath.Join(dir, "services", manifest.ServiceDir("beta"), manifest.Name))
+	require.NoError(t, err)
+	require.NotEmpty(t, other.Files)
+	otherFile := filepath.Join(dir, "services", manifest.ServiceDir("beta"), other.Files[0].Path)
+	_, err = e.Query(t.Context(), "SELECT * FROM read_parquet('"+otherFile+"')", 10)
+	require.ErrorContains(t, err, "Permission")
+}
+
+func TestScopedWithoutDataIsEmpty(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	dir := t.TempDir()
+	require.NoError(t, os.Chmod(dir, 0o700))
+	writeStoreServices(t, dir, "beta")
+	e := openScoped(t, dir, "alpha")
+
+	res, err := e.Query(t.Context(), "SELECT count(*) FROM logs", 10)
+	require.NoError(t, err)
+	require.Equal(t, [][]any{{int64(0)}}, res.Rows)
 }

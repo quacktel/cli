@@ -238,3 +238,41 @@ func TestViewsCanBeCreatedAfterLock(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, res.Rows, 1)
 }
+
+func TestQueryBindsArgs(t *testing.T) {
+	e, _ := openEngine(t, Options{})
+
+	hostile := "x'; DROP TABLE t; --"
+	res, err := e.Query(t.Context(), "SELECT ?::VARCHAR AS v", 10, hostile)
+	require.NoError(t, err)
+	require.Equal(t, [][]any{{hostile}}, res.Rows)
+
+	res, err = e.Query(t.Context(), "SELECT m[?] AS v FROM (SELECT MAP {'a.b': 'c'} AS m)", 10, "a.b")
+	require.NoError(t, err)
+	require.Equal(t, [][]any{{"c"}}, res.Rows)
+}
+
+func TestGuardRejectsWithArgs(t *testing.T) {
+	e, dir := openEngine(t, Options{})
+
+	for _, q := range []string{
+		"COPY (SELECT ?) TO '" + dir + "/x.csv'",
+		"SELECT ?; SELECT 2",
+	} {
+		_, err := e.Query(t.Context(), q, 10, 1)
+		require.ErrorIs(t, err, ErrNotSelect, q)
+	}
+	entries, err := os.ReadDir(dir)
+	require.NoError(t, err)
+	require.Empty(t, entries)
+}
+
+func TestScopedAllowedDirMustContainServiceDir(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	dir := t.TempDir()
+
+	_, err := Open(t.Context(), Options{AllowedDir: t.TempDir(), DataDir: dir, Service: "a"})
+	require.ErrorContains(t, err, "outside allowed dir")
+	_, err = Open(t.Context(), Options{AllowedDir: dir, DataDir: dir, Service: "a"})
+	require.NoError(t, err)
+}

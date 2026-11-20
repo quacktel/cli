@@ -5,11 +5,14 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/duckdb/duckdb-go/v2"
+
+	"github.com/quacktel/cli/internal/manifest"
 )
 
 const (
@@ -24,8 +27,10 @@ var ErrNotSelect = errors.New("only a single SELECT statement is allowed")
 
 type Options struct {
 	AllowedDir string
-	// DataDir, when set, must lie within AllowedDir; the logs and spans views are built from its manifests.
-	DataDir     string
+	// DataDir, when set, must lie within AllowedDir unless Service is set; the logs and spans views are built from its manifests.
+	DataDir string
+	// Service scopes the views to one service; AllowedDir must then contain that service's directory.
+	Service     string
 	MemoryLimit string
 	Threads     int
 	// Timeout bounds each query.
@@ -36,6 +41,9 @@ type Engine struct {
 	db      *sql.DB
 	timeout time.Duration
 	dataDir string
+	service string
+	// scopedDir is the one service directory the views may read; empty when unscoped.
+	scopedDir string
 
 	mu          sync.Mutex
 	fingerprint string
@@ -59,7 +67,18 @@ func Open(ctx context.Context, opts Options) (*Engine, error) {
 		opts.Timeout = defaultTimeout
 	}
 
-	if opts.DataDir != "" && !within(opts.AllowedDir, opts.DataDir) {
+	var scopedDir string
+	switch {
+	case opts.Service != "":
+		if opts.DataDir == "" {
+			return nil, errors.New("a scoped engine needs a data dir")
+		}
+		scopedDir = filepath.Join(opts.DataDir, "services", manifest.ServiceDir(opts.Service))
+		// DataDir may sit outside AllowedDir because manifests are read with Go, not DuckDB.
+		if !within(opts.AllowedDir, scopedDir) {
+			return nil, fmt.Errorf("service dir %s is outside allowed dir %s", scopedDir, opts.AllowedDir)
+		}
+	case opts.DataDir != "" && !within(opts.AllowedDir, opts.DataDir):
 		return nil, fmt.Errorf("data dir %s is outside allowed dir %s", opts.DataDir, opts.AllowedDir)
 	}
 
@@ -93,7 +112,7 @@ func Open(ctx context.Context, opts Options) (*Engine, error) {
 		return nil, errors.Join(fmt.Errorf("failed to release connection: %w", err), db.Close())
 	}
 
-	e := &Engine{db: db, timeout: opts.Timeout, dataDir: opts.DataDir}
+	e := &Engine{db: db, timeout: opts.Timeout, dataDir: opts.DataDir, service: opts.Service, scopedDir: scopedDir}
 	if err := e.refresh(ctx); err != nil {
 		return nil, errors.Join(err, db.Close())
 	}
@@ -105,7 +124,7 @@ func (e *Engine) Close() error {
 	return e.db.Close()
 }
 
-func (e *Engine) Query(ctx context.Context, query string, maxRows int) (Result, error) {
+func (e *Engine) Query(ctx context.Context, query string, maxRows int, args ...any) (Result, error) {
 	ctx, cancel := context.WithTimeout(ctx, e.timeout)
 	defer cancel()
 
@@ -123,7 +142,7 @@ func (e *Engine) Query(ctx context.Context, query string, maxRows int) (Result, 
 		return Result{}, err
 	}
 
-	rows, err := conn.QueryContext(ctx, query)
+	rows, err := conn.QueryContext(ctx, query, args...)
 	if err != nil {
 		return Result{}, fmt.Errorf("failed to run query: %w", err)
 	}

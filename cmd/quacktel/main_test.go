@@ -698,3 +698,39 @@ func readManifest(t *testing.T, svcDir string) []manifestFile {
 
 	return m.Files
 }
+
+func TestQueryServiceScope(t *testing.T) {
+	addr := freeAddr(t)
+	dir := dataDir(t)
+	p := startServe(t, addr, dir)
+	for _, name := range []string{"claude_code_logs.json", "openshell_ocsf_logs.json"} {
+		fixture, err := os.ReadFile(filepath.Join("..", "..", "testdata", name))
+		require.NoError(t, err)
+		require.Equal(t, http.StatusOK, post(t, "http://"+addr+"/v1/logs", "application/json", fixture))
+	}
+	require.NoError(t, p.cmd.Process.Signal(syscall.SIGTERM))
+	require.NoError(t, p.wait(t), p.stderr.String())
+
+	all := queryRows(t, dir, "SELECT DISTINCT service_name FROM logs ORDER BY service_name")
+	require.Len(t, all, 2)
+
+	out, err := runBin(t, "query", "--data-dir", dir, "--service", "claude-code", "--format", "json", "SELECT DISTINCT service_name FROM logs")
+	require.NoError(t, err)
+	var rows []map[string]any
+	require.NoError(t, json.Unmarshal([]byte(out), &rows))
+	require.Equal(t, []map[string]any{{"service_name": "claude-code"}}, rows)
+
+	out, err = runBin(t, "query", "--data-dir", dir, "--service", "nonexistent", "--format", "json", "SELECT count(*) AS n FROM logs")
+	require.NoError(t, err)
+	require.JSONEq(t, `[{"n":0}]`, out)
+}
+
+func TestQueryTableNullIsEmpty(t *testing.T) {
+	dir := dataDir(t)
+	out, err := runBin(t, "query", "--data-dir", dir, "--format", "table", "SELECT 1 AS a, NULL AS b, 'x' AS c")
+	require.NoError(t, err)
+	require.NotContains(t, out, "<nil>")
+	lines := strings.Split(strings.TrimRight(out, "\n"), "\n")
+	require.Len(t, lines, 2)
+	require.Equal(t, []string{"1", "x"}, strings.Fields(lines[1]))
+}

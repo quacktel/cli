@@ -1,6 +1,8 @@
 package manifest
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -17,6 +19,8 @@ import (
 const (
 	Name    = "manifest.json"
 	Version = 1
+
+	maxSlugLen = 64
 )
 
 type File struct {
@@ -143,4 +147,31 @@ func SyncDir(path string) (err error) {
 	}
 
 	return nil
+}
+
+func slugReplacer(r rune) rune {
+	switch {
+	case r >= 'a' && r <= 'z', r >= '0' && r <= '9', r == '.', r == '_', r == '-':
+		return r
+	}
+
+	return '_'
+}
+
+// ServiceDir keeps untrusted service names off the filesystem as paths; the hash separates names that slug alike.
+func ServiceDir(name string) string {
+	if name == "" {
+		name = "unknown_service"
+	}
+	slug := strings.TrimLeft(strings.Map(slugReplacer, strings.ToLower(name)), ".-")
+	if len(slug) > maxSlugLen {
+		slug = slug[:maxSlugLen]
+	}
+	// A leading '-' would read as a flag to shell tools, so an empty slug gets a placeholder.
+	if slug == "" {
+		slug = "_"
+	}
+	sum := sha256.Sum256([]byte(name))
+
+	return slug + "-" + hex.EncodeToString(sum[:])[:8]
 }
