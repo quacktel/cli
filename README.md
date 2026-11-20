@@ -236,3 +236,13 @@ mise run check:tidy
 
 [DESIGN.md](DESIGN.md) has the design and its decisions. [AGENTS.md](AGENTS.md)
 has the conventions and invariants contributors and agents follow.
+
+## Built with AI
+
+This project is built with AI-assisted development workflows using tools including
+[OpenAI Codex](https://developers.openai.com/codex/), [Claude Code](https://claude.ai/code), and
+[Cursor](https://cursor.com).
+
+## License
+
+Apache-2.0. See [LICENSE](LICENSE).
