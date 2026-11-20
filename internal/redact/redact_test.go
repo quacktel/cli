@@ -9,6 +9,39 @@ import (
 	"github.com/quacktel/cli/internal/redact"
 )
 
+func TestKeyMatching(t *testing.T) {
+	redacted := []string{
+		"token", "access_token", "refresh_token", "id_token", "session_token", "X-Auth-Token", "x-csrf-token",
+		"http.request.header.x-auth-token", "csrftoken", "github_token", "auth_token_value", "Authorization",
+		"X-API-KEY", "api_key", "password", "client_secret", "cookie", "aws_credentials", "bearer_auth",
+	}
+	kept := []string{
+		"input_tokens", "output_tokens", "cache_read_tokens", "cache_creation_tokens", "cache_creation_5m_tokens",
+		"total_tokens", "pre_tokens", "post_tokens", "token_count", "max_tokens", "cost_usd", "session.id",
+		"prompt_length", "tokenizer",
+	}
+	for _, k := range redacted {
+		t.Run("redacted/"+k, func(t *testing.T) {
+			ld := plog.NewLogs()
+			lr := ld.ResourceLogs().AppendEmpty().ScopeLogs().AppendEmpty().LogRecords().AppendEmpty()
+			lr.Attributes().PutStr(k, "v")
+			require.Equal(t, 1, redact.Default().Logs(ld))
+			v, _ := lr.Attributes().Get(k)
+			require.Equal(t, "[REDACTED]", v.Str())
+		})
+	}
+	for _, k := range kept {
+		t.Run("kept/"+k, func(t *testing.T) {
+			ld := plog.NewLogs()
+			lr := ld.ResourceLogs().AppendEmpty().ScopeLogs().AppendEmpty().LogRecords().AppendEmpty()
+			lr.Attributes().PutStr(k, "v")
+			require.Zero(t, redact.Default().Logs(ld))
+			v, _ := lr.Attributes().Get(k)
+			require.Equal(t, "v", v.Str())
+		})
+	}
+}
+
 func TestLogs(t *testing.T) {
 	ld := plog.NewLogs()
 	rl := ld.ResourceLogs().AppendEmpty()

@@ -209,7 +209,7 @@ func TestServeEndToEnd(t *testing.T) {
 	require.NoError(t, p.cmd.Process.Signal(syscall.SIGTERM))
 	require.NoError(t, p.wait(t), p.stderr.String())
 
-	q := "SELECT event_name, session_id, attrs['api_key'] AS k, trace_id FROM read_parquet('" + dir +
+	q := "SELECT event_name, session_id, attrs['api_key'] AS k, attrs['input_tokens'] AS it, attrs['cost_usd'] AS cost, trace_id FROM read_parquet('" + dir +
 		"/services/*/logs/**/*.parquet') ORDER BY time, event_name"
 	out, err := runBin(t, "query", "--data-dir", dir, "--format", "json", q)
 	require.NoError(t, err)
@@ -226,6 +226,8 @@ func TestServeEndToEnd(t *testing.T) {
 		} else {
 			require.Equal(t, "claude_code.api_request", row["event_name"])
 			require.Equal(t, "[REDACTED]", row["k"])
+			require.Equal(t, "100", row["it"])
+			require.Equal(t, "0.0123", row["cost"])
 			require.Equal(t, traceID, row["trace_id"])
 		}
 	}
@@ -235,7 +237,7 @@ func TestServeEndToEnd(t *testing.T) {
 	var stats map[string]any
 	require.NoError(t, json.Unmarshal(raw, &stats))
 	require.EqualValues(t, 1, stats["metrics_dropped"])
-	require.GreaterOrEqual(t, stats["values_redacted"], float64(2))
+	require.EqualValues(t, 2, stats["values_redacted"])
 	require.EqualValues(t, 4, stats["records_accepted"])
 
 	require.NoError(t, filepath.WalkDir(dir, func(path string, d fs.DirEntry, err error) error {
@@ -249,6 +251,17 @@ func TestServeEndToEnd(t *testing.T) {
 
 		return nil
 	}))
+}
+
+func TestServeMaxInFlightFlag(t *testing.T) {
+	addr := freeAddr(t)
+	dir := dataDir(t)
+	p := startServe(t, addr, dir, "--max-inflight", "1")
+
+	require.Equal(t, http.StatusOK, post(t, "http://"+addr+"/v1/metrics", "application/x-protobuf", []byte("ignored")))
+
+	require.NoError(t, p.cmd.Process.Signal(syscall.SIGTERM))
+	require.NoError(t, p.wait(t), p.stderr.String())
 }
 
 func TestServeRefusesNonLoopback(t *testing.T) {

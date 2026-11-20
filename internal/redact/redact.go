@@ -11,7 +11,7 @@ import (
 const placeholder = "[REDACTED]"
 
 var defaultGlobs = []string{
-	"*authorization*", "*cookie*", "*token*", "*secret*",
+	"*authorization*", "*cookie*", "*token", "*token.*", "*_token_*", "*bearer*", "*secret*",
 	"*password*", "*api_key*", "*apikey*", "*credential*",
 }
 

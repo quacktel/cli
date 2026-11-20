@@ -91,8 +91,10 @@ type Store struct {
 	mu       sync.Mutex
 	lock     *os.File
 	services map[string]*service
-	stats    Stats
-	closed   bool
+	// active counts services fed in this process, so stale on-disk dirs never block new ones.
+	active map[string]struct{}
+	stats  Stats
+	closed bool
 }
 
 var slugReplacer = func(r rune) rune {
@@ -150,7 +152,7 @@ func Open(ctx context.Context, opts Options) (*Store, error) {
 		return nil, errors.Join(fmt.Errorf("another quacktel serve is using data dir %s: %w", opts.DataDir, err), lock.Close())
 	}
 
-	s := &Store{opts: opts, log: opts.Logger, mem: memory.DefaultAllocator, lock: lock, services: map[string]*service{}}
+	s := &Store{opts: opts, log: opts.Logger, mem: memory.DefaultAllocator, lock: lock, services: map[string]*service{}, active: map[string]struct{}{}}
 	if err := s.init(ctx); err != nil {
 		return nil, errors.Join(err, s.unlock())
 	}
@@ -296,8 +298,8 @@ func (s *Store) AppendLogs(_ context.Context, ld plog.Logs) (int64, string, erro
 	for i := range rls.Len() {
 		rl := rls.At(i)
 		name := table.ServiceName(rl.Resource())
-		sv, ok := s.services[name]
-		if !ok && len(s.services) >= s.opts.MaxServices {
+		_, isActive := s.active[name]
+		if !isActive && len(s.active) >= s.opts.MaxServices {
 			sls := rl.ScopeLogs()
 			for j := range sls.Len() {
 				rejected += int64(sls.At(j).LogRecords().Len())
@@ -305,6 +307,8 @@ func (s *Store) AppendLogs(_ context.Context, ld plog.Logs) (int64, string, erro
 
 			continue
 		}
+		s.active[name] = struct{}{}
+		sv, ok := s.services[name]
 		if !ok {
 			sv = &service{
 				dir:      filepath.Join(s.opts.DataDir, "services", ServiceDir(name)),
@@ -548,7 +552,7 @@ func (s *Store) Stats() Stats {
 	defer s.mu.Unlock()
 
 	st := s.stats
-	st.Services = len(s.services)
+	st.Services = len(s.active)
 
 	return st
 }

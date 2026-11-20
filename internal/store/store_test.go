@@ -318,6 +318,29 @@ func TestServiceCap(t *testing.T) {
 	require.Empty(t, msg)
 }
 
+func TestServiceCapIgnoresOnDiskServices(t *testing.T) {
+	dataDir := newDataDir(t)
+	s := openStore(t, Options{DataDir: dataDir, MaxServices: 2})
+	_, _, err := s.AppendLogs(t.Context(), logsFor("a", "b"))
+	require.NoError(t, err)
+	require.NoError(t, s.Close())
+
+	s = openStore(t, Options{DataDir: dataDir, MaxServices: 2})
+	require.Zero(t, s.Stats().Services)
+
+	rejected, _, err := s.AppendLogs(t.Context(), logsFor("c"))
+	require.NoError(t, err)
+	require.Zero(t, rejected)
+	rejected, _, err = s.AppendLogs(t.Context(), logsFor("d", "e"))
+	require.NoError(t, err)
+	require.EqualValues(t, 1, rejected)
+	require.Equal(t, 2, s.Stats().Services)
+
+	rejected, _, err = s.AppendLogs(t.Context(), logsFor("a"))
+	require.NoError(t, err)
+	require.EqualValues(t, 1, rejected)
+}
+
 func TestReceiveTimePartition(t *testing.T) {
 	dataDir := newDataDir(t)
 	s := openStore(t, Options{DataDir: dataDir})

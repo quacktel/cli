@@ -103,8 +103,9 @@ func run() error {
 		kong.Description("Local OTLP to Parquet store with MCP query. Results go to stdout; logs go to stderr."),
 		kong.Writers(os.Stdout, os.Stderr),
 		kong.Vars{
-			"listen":   receiver.DefaultAddr,
-			"max_body": strconv.Itoa(receiver.DefaultMaxBody),
+			"listen":       receiver.DefaultAddr,
+			"max_body":     strconv.Itoa(receiver.DefaultMaxBody),
+			"max_inflight": strconv.Itoa(receiver.DefaultMaxInFlight),
 		},
 	)
 	if err != nil {

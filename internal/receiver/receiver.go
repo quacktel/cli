@@ -19,8 +19,9 @@ import (
 )
 
 const (
-	DefaultAddr    = "127.0.0.1:4318"
-	DefaultMaxBody = 8 << 20
+	DefaultAddr        = "127.0.0.1:4318"
+	DefaultMaxBody     = 8 << 20
+	DefaultMaxInFlight = 16
 
 	mimeProto = "application/x-protobuf"
 	mimeJSON  = "application/json"
@@ -33,10 +34,11 @@ var ErrFull = errors.New("buffer full")
 type Sink func(ctx context.Context, logs plog.Logs) (rejected int64, msg string, err error)
 
 type Options struct {
-	Addr       string
-	UnsafeBind bool
-	MaxBody    int64
-	Logger     *slog.Logger
+	Addr        string
+	UnsafeBind  bool
+	MaxBody     int64
+	MaxInFlight int
+	Logger      *slog.Logger
 }
 
 type Stats struct {
@@ -53,6 +55,7 @@ type Server struct {
 	sink    Sink
 	log     *slog.Logger
 	maxBody int64
+	slots   chan struct{}
 	hosts   map[string]struct{}
 
 	requests, accepted, rejected, full, metrics atomic.Int64
@@ -65,6 +68,9 @@ func New(opts Options, sink Sink) (*Server, error) {
 	}
 	if opts.MaxBody <= 0 {
 		opts.MaxBody = DefaultMaxBody
+	}
+	if opts.MaxInFlight <= 0 {
+		opts.MaxInFlight = DefaultMaxInFlight
 	}
 	if opts.Logger == nil {
 		opts.Logger = slog.New(slog.DiscardHandler)
@@ -86,6 +92,7 @@ func New(opts Options, sink Sink) (*Server, error) {
 		sink:    sink,
 		log:     opts.Logger,
 		maxBody: opts.MaxBody,
+		slots:   make(chan struct{}, opts.MaxInFlight),
 		hosts: map[string]struct{}{
 			net.JoinHostPort("localhost", port): {},
 			net.JoinHostPort("127.0.0.1", port): {},
@@ -164,6 +171,16 @@ func (s *Server) handle(w http.ResponseWriter, r *http.Request) {
 	mt, _, _ := mime.ParseMediaType(r.Header.Get("Content-Type"))
 	if mt != mimeProto && mt != mimeJSON {
 		http.Error(w, "content type must be application/x-protobuf or application/json", http.StatusUnsupportedMediaType)
+		return
+	}
+	// Bodies are buffered in memory, so concurrency is capped before reading.
+	select {
+	case s.slots <- struct{}{}:
+		defer func() { <-s.slots }()
+	default:
+		s.full.Add(1)
+		w.Header().Set("Retry-After", "1")
+		http.Error(w, "too many requests in flight", http.StatusTooManyRequests)
 		return
 	}
 	body, status, err := s.readBody(w, r)

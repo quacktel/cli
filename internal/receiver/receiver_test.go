@@ -34,6 +34,11 @@ func (f *fixture) calls() []plog.Logs {
 
 func start(t *testing.T, maxBody int64, sink receiver.Sink) *fixture {
 	t.Helper()
+	return startWith(t, receiver.Options{Addr: "127.0.0.1:0", MaxBody: maxBody}, sink)
+}
+
+func startWith(t *testing.T, opts receiver.Options, sink receiver.Sink) *fixture {
+	t.Helper()
 	f := &fixture{}
 	f.sink = func(ctx context.Context, logs plog.Logs) (int64, string, error) {
 		f.mu.Lock()
@@ -44,7 +49,7 @@ func start(t *testing.T, maxBody int64, sink receiver.Sink) *fixture {
 		}
 		return 0, "", nil
 	}
-	srv, err := receiver.New(receiver.Options{Addr: "127.0.0.1:0", MaxBody: maxBody}, f.sink)
+	srv, err := receiver.New(opts, f.sink)
 	require.NoError(t, err)
 	f.srv = srv
 	ctx, cancel := context.WithCancel(t.Context())
@@ -239,6 +244,52 @@ func TestSinkOutcomes(t *testing.T) {
 		require.EqualValues(t, 2, st.RecordsRejected)
 		require.EqualValues(t, 1, st.Requests)
 	})
+}
+
+func TestInFlightCap(t *testing.T) {
+	arrived := make(chan struct{}, 2)
+	release := make(chan struct{})
+	f := startWith(t, receiver.Options{Addr: "127.0.0.1:0", MaxInFlight: 2}, func(context.Context, plog.Logs) (int64, string, error) {
+		arrived <- struct{}{}
+		<-release
+		return 0, "", nil
+	})
+
+	body := sampleProto(t, 1)
+	statuses := make(chan int, 2)
+	errs := make(chan error, 2)
+	for range 2 {
+		go func() {
+			hr, err := http.NewRequestWithContext(t.Context(), http.MethodPost, "http://"+f.srv.Addr()+"/v1/logs", bytes.NewReader(body))
+			if err != nil {
+				errs <- err
+				return
+			}
+			hr.Header.Set("Content-Type", "application/x-protobuf")
+			resp, err := http.DefaultClient.Do(hr)
+			if err != nil {
+				errs <- err
+				return
+			}
+			statuses <- resp.StatusCode
+			errs <- resp.Body.Close()
+		}()
+	}
+	<-arrived
+	<-arrived
+
+	resp := f.do(t, req{body: sampleProto(t, 1)})
+	require.Equal(t, http.StatusTooManyRequests, resp.StatusCode)
+	require.Equal(t, "1", resp.Header.Get("Retry-After"))
+	require.EqualValues(t, 1, f.srv.Stats().Responses429)
+
+	close(release)
+	for range 2 {
+		require.Equal(t, http.StatusOK, <-statuses)
+		require.NoError(t, <-errs)
+	}
+	// Slots are released as handlers finish, so a later request gets through.
+	require.Equal(t, http.StatusOK, f.do(t, req{body: sampleProto(t, 1)}).StatusCode)
 }
 
 func TestMetricsDropped(t *testing.T) {

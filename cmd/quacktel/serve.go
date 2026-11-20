@@ -25,6 +25,7 @@ type serveCmd struct {
 	UnsafeBind    bool          `help:"Allow a non-loopback listen address."`
 	DataDir       string        `help:"Data directory. Defaults to the per-user config dir." type:"path"`
 	MaxBody       int64         `help:"Maximum request body size in bytes, before and after decompression." default:"${max_body}"`
+	MaxInFlight   int           `name:"max-inflight" help:"Maximum concurrent requests before new ones get 429." default:"${max_inflight}"`
 	BufferBytes   int64         `help:"Maximum buffered bytes before requests get 429." default:"67108864"`
 	FlushInterval time.Duration `help:"How often buffered logs are written to Parquet." default:"2s"`
 	MaxServices   int           `help:"Maximum number of distinct services." default:"256"`
@@ -77,10 +78,11 @@ func (c *serveCmd) Run(ctx context.Context, globals *Globals) error {
 	}
 
 	srv, err := receiver.New(receiver.Options{
-		Addr:       c.Listen,
-		UnsafeBind: c.UnsafeBind,
-		MaxBody:    c.MaxBody,
-		Logger:     globals.Logger,
+		Addr:        c.Listen,
+		UnsafeBind:  c.UnsafeBind,
+		MaxBody:     c.MaxBody,
+		MaxInFlight: c.MaxInFlight,
+		Logger:      globals.Logger,
 	}, sink)
 	if err != nil {
 		return errors.Join(fmt.Errorf("failed to start receiver: %w", err), st.Close())

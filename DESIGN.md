@@ -130,9 +130,11 @@ as a path as-is:
   blocks path traversal and avoids collisions between names that slug the same.
 - The original name is kept in the manifest and in the `service_name` column.
 - A missing `service.name` maps to `unknown_service`.
-- New service directories are capped (default 256). Past the cap, records
-  are rejected via OTLP `partial_success`, so a misbehaving sender can't
-  create unbounded directories.
+- Services are capped (default 256) per process run, counting only services
+  that have received records since startup. Past the cap, records are rejected
+  via OTLP `partial_success`, which bounds memory. Directories already on disk
+  don't count until they receive data. On-disk service directories are bounded
+  by M3 retention, which must remove expired service directories.
 - Each service is flushed and compacted independently, so many quiet services
   produce more small files. Flushes only happen when there is data, and
   compaction runs per service.
@@ -209,6 +211,8 @@ name (`union_by_name`).
   an allowed `Host`, since remote clients send it. No other gate changes.
 - Cap the request body (default 8 MiB) and the decompressed size (gzip-bomb
   defence).
+- Cap in-flight requests (default 16, `--max-inflight`). Excess requests get
+  `429` with `Retry-After` before their body is read, so buffered bodies stay bounded.
 - Bound the buffer. When full, return `429` with `Retry-After`, which OTLP
   exporters honour.
 - Return OTLP `partial_success` when records are dropped (for example a
@@ -219,8 +223,10 @@ name (`union_by_name`).
 - Runs on the write path before anything is buffered or written.
 - Masks values of resource, scope, log, span and event attributes whose
   **keys** match case-insensitive globs: `*authorization*`, `*cookie*`,
-  `*token*`, `*secret*`, `*password*`, `*api_key*`, `*apikey*`, `*credential*`.
-  The value becomes `[REDACTED]`.
+  `*token`, `*token.*`, `*_token_*`, `*bearer*`, `*secret*`, `*password*`,
+  `*api_key*`, `*apikey*`, `*credential*`. The value becomes `[REDACTED]`.
+  The token globs match credential-shaped keys (`access_token`, `x-auth-token`)
+  but not usage counts such as Claude Code's `input_tokens` or `max_tokens`.
 - Keys are case-folded and `-` is folded to `_`, so `X-API-KEY` matches `*api_key*`.
 - `config.toml` is deferred. M1 uses flags plus the built-in globs.
 - **Limitation:** log bodies and free-text values are not scanned. Prompts,
@@ -420,7 +426,7 @@ Not reused: Substrait, Participle SQL, and the custom executor.
 | M0 | Repo scaffold, Kong CLI skeleton, CI (lint + test on macOS arm64), DuckDB static-link spike | `go install ./cmd/quacktel` on a Mac gives a binary that runs `SELECT 42` through DuckDB, with no runtime extension downloads; hardening settings verified by tests. |
 | M1 | Receiver + redaction + logs writer + per-service layout + manifest | Claude Code logs land in Parquet; hostile `service.name` values (traversal, unicode, overflow past the cap) are handled; the hardening tests pass (Origin, Host, Content-Type, caps, 429). |
 | M2 | Spans writer | A Go/Node sample app's traces land and can be queried. |
-| M3 | Compaction + retention + size cap | A 24h soak shows a bounded file count, no duplicate rows, and the cap enforced. |
+| M3 | Compaction + retention (including removal of expired service directories) + size cap | A 24h soak shows a bounded file count, no duplicate rows, and the cap enforced. |
 | M4 | `engine`, `tools`, `mcp`, `query` | All six tools work against fixtures; the SELECT guard rejects the bypass corpus; a scoped session can't read another service's files through `sql`/`read_parquet`. |
 | M5 | `service` (launchd), `doctor`, `env` | Install, reboot, data still flowing, on macOS. |
 | M6 | Pre-1.0 release: goreleaser, GitHub attestations, SBOM, Homebrew tap, `install.sh` | A release binary, installed via the tap formula and via `install.sh` on a clean Mac, runs with no Gatekeeper prompt and passes `gh attestation verify`. Decide on notarisation. |
