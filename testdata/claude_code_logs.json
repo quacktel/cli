@@ -13,7 +13,7 @@
           "logRecords": [
             {
               "timeUnixNano": "1780000000000000000",
-              "eventName": "claude_code.user_prompt",
+              "body": {"stringValue": "claude_code.user_prompt"},
               "attributes": [
                 {"key": "session.id", "value": {"stringValue": "sess-test-1"}},
                 {"key": "prompt_length", "value": {"intValue": "42"}},
@@ -22,12 +22,12 @@
             },
             {
               "timeUnixNano": "1780000001000000000",
-              "eventName": "claude_code.api_request",
-              "body": {"stringValue": "synthetic api request"},
+              "body": {"stringValue": "claude_code.api_request"},
               "traceId": "0123456789abcdef0123456789abcdef",
               "spanId": "0123456789abcdef",
               "attributes": [
                 {"key": "session.id", "value": {"stringValue": "sess-test-1"}},
+                {"key": "event.name", "value": {"stringValue": "api_request"}},
                 {"key": "model", "value": {"stringValue": "test-model"}},
                 {"key": "cost_usd", "value": {"doubleValue": 0.0123}},
                 {"key": "input_tokens", "value": {"intValue": "100"}},

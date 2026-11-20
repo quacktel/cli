@@ -106,7 +106,9 @@ The token is a local secret, so keep `settings.json` private.
 
 Claude Code sends its usage data (cost, tokens, tool results, prompts if you
 enable `OTEL_LOG_USER_PROMPTS`) as log events. You'll find them in `logs`, with
-`event_name` values such as `claude_code.api_request`. Claude Code's traces are
+`event_name` values such as `api_request`, `tool_result` and `user_prompt`
+(Claude Code puts the short name in the `event.name` attribute and
+`claude_code.api_request` in the body). Claude Code's traces are
 a beta feature; enable them with `CLAUDE_CODE_ENHANCED_TELEMETRY_BETA=1`.
 
 ### Let Claude Code query quacktel over MCP

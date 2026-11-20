@@ -232,10 +232,10 @@ func TestServeEndToEnd(t *testing.T) {
 		require.Equal(t, "sess-test-1", row["session_id"])
 		// Both posts carry the same timestamps, so rows sort as two prompts then two requests.
 		if i < 2 {
-			require.Equal(t, "claude_code.user_prompt", row["event_name"])
+			require.Equal(t, "user_prompt", row["event_name"])
 			require.Nil(t, row["k"])
 		} else {
-			require.Equal(t, "claude_code.api_request", row["event_name"])
+			require.Equal(t, "api_request", row["event_name"])
 			require.Equal(t, "[REDACTED]", row["k"])
 			require.Equal(t, "100", row["it"])
 			require.Equal(t, "0.0123", row["cost"])

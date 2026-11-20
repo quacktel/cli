@@ -106,7 +106,7 @@ func TestMCPEndToEnd(t *testing.T) {
 	require.False(t, res.IsError, "%+v", res.Content)
 	require.Contains(t, schema["note"], "untrusted")
 
-	logs := okRows(t, s, "search_logs", map[string]any{"event_name": "claude_code.api_request", "since": fixtureWindow})
+	logs := okRows(t, s, "search_logs", map[string]any{"event_name": "api_request", "since": fixtureWindow})
 	require.NotEmpty(t, logs)
 	require.Equal(t, "[REDACTED]", logs[0]["attrs"].(map[string]any)["api_key"])
 
