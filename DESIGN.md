@@ -519,7 +519,7 @@ export OTEL_METRICS_EXPORTER=none
   read from `<data-dir>/otlp-headers` (so it prints the token, on request). Like
   `doctor`, it uses the installed agent's recorded `--data-dir` unless
   `--data-dir` is given. It fails if the file doesn't exist; run
-  `quacktel serve --auth` first.
+  `quacktel service install` (or `quacktel serve --auth`) first.
 - `--json` prints the same variables as `{"env": {...}}`, the shape of
   `~/.claude/settings.json`, with the header value unquoted. It can't be
   combined with `--mcp`.

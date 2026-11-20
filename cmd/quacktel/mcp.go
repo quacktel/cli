@@ -31,7 +31,7 @@ func (c *mcpCmd) Run(ctx context.Context, globals *Globals) error {
 		}
 	}
 	if _, err := os.Stat(dir); errors.Is(err, os.ErrNotExist) {
-		return fmt.Errorf("no data dir at %s; run quacktel serve first", dir)
+		return fmt.Errorf("no data dir at %s; run quacktel service install (or quacktel serve) first", dir)
 	}
 	if err := paths.EnsureDir(dir); err != nil {
 		return err

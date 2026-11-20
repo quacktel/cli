@@ -769,7 +769,7 @@ func TestMCPMissingDataDir(t *testing.T) {
 	var exitErr *exec.ExitError
 	require.ErrorAs(t, err, &exitErr)
 	require.Empty(t, stdout.String())
-	require.Contains(t, stderr.String(), "run quacktel serve first")
+	require.Contains(t, stderr.String(), "run quacktel service install (or quacktel serve) first")
 	require.NoDirExists(t, dir)
 }
 

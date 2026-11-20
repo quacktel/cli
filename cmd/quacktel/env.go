@@ -98,7 +98,7 @@ func (c *envCmd) authHeader(kctx *kong.Context) (string, error) {
 	path := filepath.Join(dir, otlpHeadersFile)
 	data, err := os.ReadFile(path) //nolint:gosec // fixed name inside the data dir
 	if errors.Is(err, os.ErrNotExist) {
-		return "", fmt.Errorf("no %s; run quacktel serve --auth first", path)
+		return "", fmt.Errorf("no %s; run quacktel service install (or quacktel serve --auth) first", path)
 	}
 	if err != nil {
 		return "", fmt.Errorf("failed to read %s: %w", path, err)
