@@ -17,6 +17,7 @@ import (
 
 	"go.opentelemetry.io/collector/pdata/plog"
 	"go.opentelemetry.io/collector/pdata/plog/plogotlp"
+	"go.opentelemetry.io/collector/pdata/pmetric/pmetricotlp"
 	"go.opentelemetry.io/collector/pdata/ptrace"
 	"go.opentelemetry.io/collector/pdata/ptrace/ptraceotlp"
 )
@@ -205,6 +206,8 @@ func (s *Server) handle(w http.ResponseWriter, r *http.Request) {
 	}
 	if s.auth != nil && subtle.ConstantTimeCompare([]byte(r.Header.Get("Authorization")), s.auth) != 1 {
 		s.unauthorized.Add(1)
+		// RFC 9110 requires a challenge on every 401.
+		w.Header().Set("WWW-Authenticate", "Bearer")
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
 		return
 	}
@@ -231,7 +234,7 @@ func (s *Server) handle(w http.ResponseWriter, r *http.Request) {
 	switch r.URL.Path {
 	case "/v1/metrics":
 		s.metrics.Add(1)
-		s.respond(w, mt, plogotlp.NewExportResponse())
+		s.respond(w, mt, pmetricotlp.NewExportResponse())
 	case "/v1/logs":
 		s.logs(w, r, mt, body)
 	default:

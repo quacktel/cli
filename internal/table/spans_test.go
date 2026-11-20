@@ -1,6 +1,7 @@
 package table
 
 import (
+	"math"
 	"testing"
 	"time"
 
@@ -104,6 +105,21 @@ func TestSpanPromotedAttrs(t *testing.T) {
 	// Copied, not moved.
 	m := rec.Column(spAttrs).(*array.Map)
 	require.EqualValues(t, 5, m.Offsets()[1]-m.Offsets()[0])
+}
+
+func TestSpanPromotedDoubles(t *testing.T) {
+	sp := ptrace.NewSpan()
+	a := sp.Attributes()
+	a.PutDouble("http.response.status_code", 200)
+	a.PutDouble("gen_ai.usage.input_tokens", 12.5)
+	a.PutDouble("gen_ai.usage.output_tokens", math.Inf(1))
+
+	rec := appendSpans(t, sp)
+	defer rec.Release()
+
+	require.EqualValues(t, 200, rec.Column(spHTTPStatus).(*array.Int64).Value(0))
+	require.True(t, rec.Column(spInputTokens).IsNull(0))
+	require.True(t, rec.Column(spOutputTokens).IsNull(0))
 }
 
 func TestSpanMinMaxFallsBackToReceivedAt(t *testing.T) {

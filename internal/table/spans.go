@@ -1,6 +1,7 @@
 package table
 
 import (
+	"math"
 	"strconv"
 	"time"
 
@@ -182,7 +183,7 @@ func (b *SpansBuilder) ts(fb array.Builder, ts pcommon.Timestamp) {
 	fb.(*array.TimestampBuilder).Append(arrow.Timestamp(ts.AsTime().UnixNano()))
 }
 
-// int appends an int attribute or a numeric string, and null for anything else.
+// int appends an int attribute, a whole-number double or a numeric string, and null for anything else.
 func (b *SpansBuilder) int(fb array.Builder, m pcommon.Map, key string) {
 	v, ok := m.Get(key)
 	if !ok {
@@ -202,7 +203,16 @@ func (b *SpansBuilder) int(fb array.Builder, m pcommon.Map, key string) {
 			return
 		}
 		n = p
-	case pcommon.ValueTypeEmpty, pcommon.ValueTypeDouble, pcommon.ValueTypeBool, pcommon.ValueTypeMap, pcommon.ValueTypeSlice, pcommon.ValueTypeBytes:
+	case pcommon.ValueTypeDouble:
+		// Some SDKs encode counts as doubles; only whole numbers inside int64 range are kept.
+		d := v.Double()
+		if d != math.Trunc(d) || d < math.MinInt64 || d >= math.MaxInt64 {
+			fb.AppendNull()
+
+			return
+		}
+		n = int64(d)
+	case pcommon.ValueTypeEmpty, pcommon.ValueTypeBool, pcommon.ValueTypeMap, pcommon.ValueTypeSlice, pcommon.ValueTypeBytes:
 		fb.AppendNull()
 
 		return

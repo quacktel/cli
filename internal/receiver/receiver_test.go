@@ -417,7 +417,11 @@ func TestAuth(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			require.Equal(t, tt.want, f.do(t, tt.req).StatusCode)
+			resp := f.do(t, tt.req)
+			require.Equal(t, tt.want, resp.StatusCode)
+			if tt.want == http.StatusUnauthorized {
+				require.Equal(t, "Bearer", resp.Header.Get("WWW-Authenticate"))
+			}
 		})
 	}
 	require.Len(t, f.calls(), 1)
