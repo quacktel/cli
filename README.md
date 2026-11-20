@@ -1,1 +1,238 @@
-# cli
+# quacktel
+
+A local OpenTelemetry sink for coding agents. `quacktel` receives OTLP logs and
+traces on `127.0.0.1`, stores them as Parquet on your machine, and lets agents
+query them over MCP. Telemetry never leaves the machine.
+
+Use it to let Claude Code analyse its own sessions (cost, tokens, tool use), to
+debug the apps you're building from their logs and traces, or as a sink for
+[OpenShell](#openshell) sandbox network events.
+
+> Status: pre-1.0, macOS on Apple silicon only. Linux support is planned.
+
+## Features
+
+- **OTLP/HTTP receiver**: logs and traces, protobuf or JSON, gzip. Metrics are
+  accepted and dropped.
+- **Locked down by default**: listens on loopback only, rejects browser requests
+  (`Origin`) and DNS-rebinding `Host` headers, caps body size and in-flight
+  requests, and can require a bearer token (`--auth`).
+- **Redaction before storage**: values of secret-looking attribute keys
+  (`authorization`, `cookie`, `*_token`, `password`, `api_key`, …) are replaced
+  with `[REDACTED]`. Token *counts* such as `input_tokens` are kept. Log bodies
+  aren't scanned.
+- **Parquet storage**: per-service directories, compacted into hourly files, with
+  30-day retention and a 10 GiB disk cap by default.
+- **SQL over your telemetry**: `quacktel query` runs read-only DuckDB SQL over
+  `logs` and `spans` views.
+- **MCP server for agents**: `quacktel mcp` exposes six read-only tools:
+  `list_services`, `describe_schema`, `search_logs`, `find_spans`, `get_trace`
+  and `sql`. Sessions can be scoped to one service.
+- **Background service**: `quacktel service install` runs the receiver as a
+  per-user launchd agent that survives logout and reboot.
+- **Health checks**: `quacktel doctor` checks the receiver, the service, the
+  data dir and the read path.
+
+## Install
+
+Build from source. You need the Xcode command-line tools, for cgo, and
+[mise](https://mise.jdx.dev), which pins Go and the other tools.
+
+```sh
+git clone https://github.com/quacktel/cli.git
+cd cli
+mise install
+mise run install        # installs to ~/.local/bin/quacktel
+```
+
+Make sure `~/.local/bin` is on your `PATH`.
+
+## Quick start
+
+```sh
+quacktel service install    # start the receiver in the background (with --auth)
+quacktel doctor             # every check should be ok
+```
+
+`service install` runs `quacktel serve --auth` under launchd. To change the
+receiver's settings, pass `serve` flags after `--`. They're validated before
+anything is written:
+
+```sh
+quacktel service install -- --retention 168h --max-disk 5368709120
+```
+
+Running `service install` again upgrades in place. After rebuilding the binary,
+run `quacktel service restart`. Use `quacktel service status` to see what's
+running and `quacktel service uninstall` to remove it.
+
+To run the receiver in the foreground instead, use `quacktel serve`. Add
+`--auth` if anything outside your shell will send to it.
+
+## Claude Code
+
+### Send Claude Code's telemetry to quacktel
+
+`quacktel env` prints the environment variables an OTel exporter needs. For
+Claude Code, add `--claude-code`. Add `--auth` if the receiver requires a token,
+which is the default for `service install`.
+
+```sh
+quacktel env --claude-code --auth
+```
+
+```sh
+export OTEL_EXPORTER_OTLP_ENDPOINT=http://127.0.0.1:4318
+export OTEL_EXPORTER_OTLP_PROTOCOL=http/protobuf
+export OTEL_LOGS_EXPORTER=otlp
+export OTEL_TRACES_EXPORTER=otlp
+export OTEL_METRICS_EXPORTER=none
+export CLAUDE_CODE_ENABLE_TELEMETRY=1
+export OTEL_EXPORTER_OTLP_HEADERS='authorization=Bearer <token>'
+```
+
+For one shell, run `eval "$(quacktel env --claude-code --auth)"` before starting
+`claude`. To make it permanent, put the same variables in the `env` block of
+`~/.claude/settings.json`. The token is a local secret, so keep that file
+private.
+
+Claude Code sends its usage data (cost, tokens, tool results, prompts if you
+enable `OTEL_LOG_USER_PROMPTS`) as log events. You'll find them in `logs`, with
+`event_name` values such as `claude_code.api_request`. Claude Code's traces are
+a beta feature; enable them with `CLAUDE_CODE_ENHANCED_TELEMETRY_BETA=1`.
+
+### Let Claude Code query quacktel over MCP
+
+```sh
+claude mcp add quacktel -- "$(command -v quacktel)" mcp
+```
+
+Or print a config to paste into any MCP client:
+
+```sh
+quacktel env --mcp
+```
+
+Then ask things like *"what did my API requests cost today?"* or *"show the
+slowest spans from my app in the last hour"*.
+
+- The tools default to the last 24 hours and 100 rows (max 500), and cut long
+  strings at 2,000 characters.
+- Every result is labelled as untrusted data. Telemetry is written by local
+  processes, and agents shouldn't follow instructions found in it.
+- `quacktel mcp --service <name>` limits a session to one service's data, and
+  `--no-sql` removes the raw `sql` tool.
+- `quacktel serve` (or `service install`) must have run at least once, so the
+  data dir exists. If Claude Code reports the server as disconnected, the reason
+  is on the server's stderr: check Claude Code's MCP logs or run
+  `claude --debug`.
+
+## OpenShell
+
+The OpenShell gateway can export sandbox network events (OCSF) as OTLP logs.
+With quacktel running with `--auth` (the default for `service install`), add
+this to the gateway's `gateway.toml`:
+
+```toml
+[openshell.gateway.otlp.ocsf]
+enabled      = true
+endpoint     = "http://127.0.0.1:4318"
+protocol     = "http/protobuf"
+headers_file = "/Users/<you>/Library/Application Support/quacktel/otlp-headers"
+```
+
+- `headers_file` is quacktel's token file, in the format the gateway expects.
+  It's created on the first `serve --auth` and reused across restarts.
+- Restart the gateway after the file is first created, because the gateway reads
+  it only at startup.
+- The gateway retries batches, so the same event can be stored twice.
+  Deduplicate on `ocsf.metadata.uid` in queries.
+- OCSF bodies include command lines and process ancestry, and **are not
+  redacted**.
+- Gap records (`event_name = 'openshell.ocsf.gap'`) report events the exporter
+  dropped.
+
+```sql
+SELECT DISTINCT attrs['ocsf.metadata.uid'] AS uid,
+       json_extract_string(body, '$.action') AS action,
+       json_extract_string(body, '$.dst_endpoint.hostname') AS host,
+       coalesce(attrs['openshell.sandbox.id'], resource_attrs['openshell.sandbox.id']) AS sandbox
+FROM logs
+WHERE attrs['ocsf.class_uid'] = '4001'
+ORDER BY uid;
+```
+
+## Your own apps
+
+Point any OpenTelemetry SDK at quacktel with the same variables, without
+`--claude-code`:
+
+```sh
+eval "$(quacktel env --auth)"
+```
+
+Set `service.name` in your app's resource. Each service gets its own directory,
+and `quacktel mcp --service <name>` scopes to it. `examples/otel-go-app` is a
+small Go app that sends a sample trace:
+
+```sh
+OTEL_EXPORTER_OTLP_ENDPOINT=http://127.0.0.1:4318 go run -C examples/otel-go-app .
+```
+
+## Querying
+
+```sh
+quacktel query "SELECT event_name, count(*) FROM logs GROUP BY 1 ORDER BY 2 DESC"
+quacktel query --format json "SELECT name, duration_ns FROM spans ORDER BY duration_ns DESC LIMIT 10"
+quacktel query --service claude-code "SELECT sum(CAST(attrs['cost_usd'] AS DOUBLE)) FROM logs"
+```
+
+- Query the `logs` and `spans` views. They're built from the manifests, so they
+  only include committed files.
+- Don't `read_parquet` the files directly: during compaction a glob can return
+  rows twice.
+- Attribute values are stored as strings, so `CAST` them for numeric
+  comparisons.
+- Only single `SELECT` statements run, and DuckDB can only read the stored
+  telemetry, not other files.
+
+## Storage locations
+
+| What | Where |
+|---|---|
+| Binary | `~/.local/bin/quacktel` |
+| Data dir | `~/Library/Application Support/quacktel/` (mode `0700`; override with `--data-dir`) |
+| Telemetry | `<data dir>/services/<service>-<hash>/{logs,spans}/date=YYYY-MM-DD/hour=HH/*.parquet` |
+| Per-service file index | `<data dir>/services/<service>-<hash>/manifest.json` |
+| Auth token | `<data dir>/otlp-headers` (mode `0600`; created by `serve --auth`) |
+| Receiver counters | `<data dir>/stats.json` (reset when the receiver restarts) |
+| Service log | `~/Library/Logs/quacktel/serve.log` (rotated at 10 MiB, 3 kept) |
+| launchd crash log | `~/Library/Logs/quacktel/launchd.log` |
+| LaunchAgent | `~/Library/LaunchAgents/dev.quacktel.serve.plist` |
+
+Partitions use the time quacktel received the data (UTC), not the record's
+timestamp. Old hours are deleted whole by retention or the disk cap; the current
+hour is never deleted. If the current hour alone exceeds the disk cap, new
+writes are refused with 429 until space frees up.
+
+## Security notes
+
+- The receiver only listens on loopback unless you pass `--unsafe-bind`, which
+  also turns on `--auth`.
+- Any local process can send telemetry and pick its own `service.name`. Treat
+  stored content, and anything an agent reads from it, as untrusted.
+- Redaction only looks at attribute keys. Log bodies (Claude Code prompts if you
+  enable them, OCSF command lines) are stored as received.
+- `quacktel env --auth` prints the token on purpose. Don't paste its output
+  anywhere public.
+
+## Development
+
+```sh
+mise exec -- go test -race ./...
+mise exec -- golangci-lint run ./...
+mise run check:tidy
+```
+
+[DESIGN.md](DESIGN.md) has the design and its decisions. [AGENTS.md](AGENTS.md)
+has the conventions and invariants contributors and agents follow.
