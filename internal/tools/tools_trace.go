@@ -12,8 +12,11 @@ const (
 )
 
 type GetTraceInput struct {
-	TraceID string `json:"trace_id" jsonschema:"Trace ID as 32 hex characters."`
-	Service string `json:"service,omitempty" jsonschema:"Only include this service name."`
+	TraceID  string `json:"trace_id" jsonschema:"Trace ID as 32 hex characters."`
+	Service  string `json:"service,omitempty" jsonschema:"Only include this service name."`
+	MaxSpans int    `json:"max_spans,omitempty" jsonschema:"Maximum spans to return, ordered by start time. Defaults to 1000, capped at 1000."`
+	// A pointer so an omitted field defaults to true.
+	IncludeLogs *bool `json:"include_logs,omitempty" jsonschema:"Also return logs correlated by trace_id. Defaults to true."`
 }
 
 type TraceOutput struct {
@@ -32,6 +35,13 @@ func (r *Runner) GetTrace(ctx context.Context, in GetTraceInput) (TraceOutput, e
 	if err != nil {
 		return TraceOutput{}, err
 	}
+	maxSpans := in.MaxSpans
+	switch {
+	case maxSpans < 0:
+		return TraceOutput{}, inputErr("max_spans must not be negative")
+	case maxSpans == 0 || maxSpans > maxTraceSpans:
+		maxSpans = maxTraceSpans
+	}
 
 	sq := newQuery("SELECT "+spanColumns+", end_time, attrs, list_transform(events, lambda e: e.name) AS event_names FROM spans WHERE trace_id = ?", id)
 	lq := newQuery("SELECT time, service_name, severity_number, severity_text, event_name, body, span_id, attrs FROM logs WHERE trace_id = ?", id)
@@ -42,30 +52,31 @@ func (r *Runner) GetTrace(ctx context.Context, in GetTraceInput) (TraceOutput, e
 	sq.add("ORDER BY start_time")
 	lq.add("ORDER BY time")
 
-	sres, err := r.run(ctx, sq, maxTraceSpans)
+	sres, err := r.run(ctx, sq, maxSpans)
 	if err != nil {
 		return TraceOutput{}, fmt.Errorf("failed to get trace spans: %w", err)
 	}
-	lres, err := r.run(ctx, lq, maxTraceLogs)
-	if err != nil {
-		return TraceOutput{}, fmt.Errorf("failed to get trace logs: %w", err)
+	truncated := sres.Truncated
+	spans := normalizeRows(sres, &truncated)
+	logs := []map[string]any{}
+	if in.IncludeLogs == nil || *in.IncludeLogs {
+		lres, err := r.run(ctx, lq, maxTraceLogs)
+		if err != nil {
+			return TraceOutput{}, fmt.Errorf("failed to get trace logs: %w", err)
+		}
+		truncated = truncated || lres.Truncated
+		logs = normalizeRows(lres, &truncated)
 	}
 
-	spans, used := toRowsBudget(sres, maxResultChars)
-	logs, _ := toRowsBudget(lres, maxResultChars-used)
-	addDepths(spans.Rows)
-	for _, s := range spans.Rows {
+	attrsDropped, rowsDropped := fitBudget(maxResultChars, true, &spans, &logs)
+	addDepths(spans)
+	for _, s := range spans {
 		if s["event_names"] == nil {
 			s["event_names"] = []any{}
 		}
 	}
 
-	note := untrustedNote
-	if spans.Note != untrustedNote || logs.Note != untrustedNote {
-		note += sizeCapNote
-	}
-
-	return TraceOutput{Spans: spans.Rows, Logs: logs.Rows, Truncated: spans.Truncated || logs.Truncated, Note: note}, nil
+	return TraceOutput{Spans: spans, Logs: logs, Truncated: truncated || attrsDropped || rowsDropped, Note: budgetNote(attrsDropped, rowsDropped)}, nil
 }
 
 func addDepths(spans []map[string]any) {
@@ -113,5 +124,5 @@ func (r *Runner) SQL(ctx context.Context, in SQLInput) (Rows, error) {
 		return Rows{}, fmt.Errorf("%w: %w", ErrInput, err)
 	}
 
-	return toRows(res), nil
+	return sqlRows(res), nil
 }

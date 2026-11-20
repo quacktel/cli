@@ -39,7 +39,7 @@ func New(r *tools.Runner, opts Options) *mcp.Server {
 	mcp.AddTool(srv, tool("describe_schema", "Describe the logs and spans columns and the 50 most common attribute keys of the last 24h, with an example value each. Set event_name to count log attribute keys for one event only. Call this before filtering on attrs."), handle(log, r.DescribeSchema, schemaSummary))
 	mcp.AddTool(srv, tool("search_logs", "Search logs by severity, body text or regex, event name, trace, session or attributes, newest first."+window+sizeCap+untrust), handle(log, r.SearchLogs, rowsSummary))
 	mcp.AddTool(srv, tool("find_spans", "Find spans by name, kind, status, route, minimum duration or attributes, slowest first. The window applies to span start time."+window+sizeCap+untrust), handle(log, r.FindSpans, rowsSummary))
-	mcp.AddTool(srv, tool("get_trace", "Fetch every span of one trace as a flat list ordered by start time, with depth, plus correlated logs. The time window does not apply."+sizeCap+untrust), handle(log, r.GetTrace, traceSummary))
+	mcp.AddTool(srv, tool("get_trace", "Fetch the spans of one trace (up to max_spans) as a flat list ordered by start time, with depth, plus correlated logs. Set max_spans to limit spans and include_logs=false to skip logs. The time window does not apply."+sizeCap+untrust), handle(log, r.GetTrace, traceSummary))
 	if opts.SQL {
 		mcp.AddTool(srv, tool("sql", "Run one read-only SELECT over the logs and spans views, returning at most 500 rows."+sqlViews+sqlNoWindow+sizeCap+untrust), handle(log, r.SQL, rowsSummary))
 	}

@@ -123,7 +123,7 @@ func Fixture(t *testing.T) string {
 	return fixture(t, 0)
 }
 
-// FixtureBulkLogs is Fixture plus n extra recent "bulk" logs in the agent service.
+// FixtureBulkLogs is Fixture plus n extra recent "bulk" logs (each with a 1500-char attr) in the agent service.
 func FixtureBulkLogs(t *testing.T, n int) string {
 	t.Helper()
 
@@ -152,7 +152,8 @@ func fixture(t *testing.T, bulk int) string {
 	if bulk > 0 {
 		specs := make([]logSpec, bulk)
 		for i := range specs {
-			specs[i] = logSpec{at: -2 * time.Minute, sev: plog.SeverityNumberInfo, sevText: "INFO", body: "bulk"}
+			specs[i] = logSpec{at: -2 * time.Minute, sev: plog.SeverityNumberInfo, sevText: "INFO", body: "bulk",
+				attrs: map[string]string{"pad": strings.Repeat("p", 1500)}}
 		}
 		addLogs(ld, "agent", specs)
 	}

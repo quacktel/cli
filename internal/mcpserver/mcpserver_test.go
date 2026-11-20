@@ -62,6 +62,12 @@ func TestListTools(t *testing.T) {
 			require.NotNil(t, tool.Annotations.OpenWorldHint, tool.Name)
 			require.False(t, *tool.Annotations.OpenWorldHint, tool.Name)
 			require.NotEmpty(t, tool.Description)
+			if tool.Name == "get_trace" {
+				schema, err := json.Marshal(tool.InputSchema)
+				require.NoError(t, err)
+				require.Contains(t, string(schema), `"max_spans"`)
+				require.Contains(t, string(schema), `"include_logs"`)
+			}
 		}
 		require.Contains(t, names, "get_trace")
 		require.Equal(t, sql, slices.Contains(names, "sql"))

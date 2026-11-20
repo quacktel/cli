@@ -217,6 +217,56 @@ func TestResultBudget(t *testing.T) {
 	require.LessOrEqual(t, len(b), 40000)
 }
 
+func TestResultBudgetDropsAttrsBeforeRows(t *testing.T) {
+	r := newRunnerDir(t, toolstest.FixtureBulkLogs(t, 40), "")
+	rows, err := r.SearchLogs(t.Context(), tools.SearchLogsInput{Limit: 40})
+	require.NoError(t, err)
+	require.Len(t, rows.Rows, 40)
+	for _, row := range rows.Rows {
+		require.NotContains(t, row, "attrs")
+	}
+	require.True(t, rows.Truncated)
+	require.Contains(t, rows.Note, "attrs were omitted")
+	require.NotContains(t, rows.Note, "rows were dropped")
+}
+
+func TestResultBudgetDropsAttrsAndRows(t *testing.T) {
+	r := newRunnerDir(t, toolstest.FixtureBulkLogs(t, 400), "")
+	rows, err := r.SearchLogs(t.Context(), tools.SearchLogsInput{Limit: 500})
+	require.NoError(t, err)
+	require.NotEmpty(t, rows.Rows)
+	require.Less(t, len(rows.Rows), 400)
+	for _, row := range rows.Rows {
+		require.NotContains(t, row, "attrs")
+	}
+	require.Contains(t, rows.Note, "attrs were omitted, rows were dropped")
+	require.Equal(t, 1, strings.Count(rows.Note, "size cap"))
+}
+
+func TestSQLBudgetKeepsAttrs(t *testing.T) {
+	r := newRunner(t, "")
+	rows, err := r.SQL(t.Context(), tools.SQLInput{Query: "SELECT map(['k'], [repeat('x', 1900)]) AS attrs FROM range(100)", Limit: 100})
+	require.NoError(t, err)
+	require.NotEmpty(t, rows.Rows)
+	require.Less(t, len(rows.Rows), 100)
+	for _, row := range rows.Rows {
+		require.NotEmpty(t, row["attrs"])
+	}
+	require.True(t, rows.Truncated)
+	require.Contains(t, rows.Note, "size cap")
+	require.NotContains(t, rows.Note, "attrs were omitted")
+}
+
+func TestResultBudgetKeepsAttrsWhenFits(t *testing.T) {
+	r := newRunner(t, "")
+	rows, err := r.SQL(t.Context(), tools.SQLInput{Query: "SELECT map(['k'], ['v']) AS attrs", Limit: 5})
+	require.NoError(t, err)
+	require.Len(t, rows.Rows, 1)
+	require.Contains(t, rows.Rows[0], "attrs")
+	require.False(t, rows.Truncated)
+	require.NotContains(t, rows.Note, "size cap")
+}
+
 func TestDescribeSchemaEventName(t *testing.T) {
 	r := newRunner(t, "")
 	out, err := r.DescribeSchema(t.Context(), tools.DescribeSchemaInput{EventName: "tool.call"})
@@ -337,6 +387,32 @@ func TestGetTrace(t *testing.T) {
 	out, err = r.GetTrace(t.Context(), tools.GetTraceInput{TraceID: toolstest.TraceID, Service: "web"})
 	require.NoError(t, err)
 	require.Empty(t, out.Spans)
+}
+
+func TestGetTraceOptions(t *testing.T) {
+	r := newRunner(t, "")
+	out, err := r.GetTrace(t.Context(), tools.GetTraceInput{TraceID: toolstest.TraceID, MaxSpans: 2})
+	require.NoError(t, err)
+	require.Len(t, out.Spans, 2)
+	require.Equal(t, "root", out.Spans[0]["name"])
+	require.Equal(t, "chat", out.Spans[1]["name"])
+	require.True(t, out.Truncated)
+
+	_, err = r.GetTrace(t.Context(), tools.GetTraceInput{TraceID: toolstest.TraceID, MaxSpans: -1})
+	require.ErrorIs(t, err, tools.ErrInput)
+
+	out, err = r.GetTrace(t.Context(), tools.GetTraceInput{TraceID: toolstest.TraceID, MaxSpans: 5000})
+	require.NoError(t, err)
+	require.Len(t, out.Spans, 4)
+
+	off := false
+	out, err = r.GetTrace(t.Context(), tools.GetTraceInput{TraceID: toolstest.TraceID, IncludeLogs: &off})
+	require.NoError(t, err)
+	require.Len(t, out.Spans, 4)
+	require.Empty(t, out.Logs)
+	b, err := json.Marshal(out)
+	require.NoError(t, err)
+	require.Contains(t, string(b), `"logs":[]`)
 }
 
 func TestGetTraceIgnoresWindow(t *testing.T) {
