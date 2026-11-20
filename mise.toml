@@ -21,4 +21,6 @@ run = ["go fix ./...", "golangci-lint fmt", "golangci-lint run --fix"]
 run = "go test -race -count=1 ./..."
 
 [tasks.install]
+# A stable path outside mise's per-Go-version dir, because the LaunchAgent records the binary's absolute path.
+env = { GOBIN = "{{env.HOME}}/.local/bin" }
 run = "go install ./cmd/quacktel"
