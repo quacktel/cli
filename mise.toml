@@ -1,0 +1,9 @@
+[settings]
+experimental = true
+lockfile = true
+
+[tools]
+go = "1.27.4"
+golangci-lint = "2.15.0"
+goreleaser = "2.20.2"
+lefthook = "2.2.2"
