@@ -202,6 +202,13 @@ name (`union_by_name`).
   non-loopback addresses are refused unless `--unsafe-bind` is given.
 - Reject any request with an `Origin` header. OTel SDKs don't send one; browsers do.
 - Require `Host` to be `localhost:4318` or `127.0.0.1:4318` (DNS-rebinding defence).
+- Optionally require `Authorization: Bearer <token>` (`--auth`, implied by
+  `--unsafe-bind`), compared in constant time. The token lives in
+  `<data-dir>/otlp-headers` in the OpenShell headers-file format
+  (`authorization=Bearer <64 hex>`), created `0600` and reused across restarts.
+  A malformed file or a mode wider than `0600` fails startup. A missing or wrong
+  header returns `401` before the body is read. Gate order: method and path,
+  `Origin`, `Host`, `Authorization`, `Content-Type`, in-flight slot, body.
 - Require `Content-Type` to be `application/x-protobuf` or `application/json`.
   Browsers must preflight these, and preflights are never answered.
 - Accept only `POST /v1/logs` (and `/v1/traces` from M2; it returns `404` until
@@ -358,6 +365,37 @@ common SDKs. Claude Code's cost and token data arrives as log events
 (Verify the current event names and attributes against the Claude Code
 monitoring docs in M1.)
 
+### OpenShell
+
+The OpenShell gateway runs on the same host and exports sandbox network events
+(OCSF) as OTLP/HTTP protobuf logs over loopback. Start `quacktel serve --auth`
+and add this to the gateway's `gateway.toml`:
+
+```toml
+[openshell.gateway.otlp.ocsf]
+enabled = true
+endpoint = "http://127.0.0.1:4318"
+protocol = "http/protobuf"
+headers_file = "<data-dir>/otlp-headers"
+```
+
+- The gateway reads the headers file only at startup, so restart it after the
+  file is first created. quacktel reuses the same token across restarts.
+- The gateway retries batches and quacktel doesn't dedupe on write, so
+  duplicates are possible. Deduplicate in queries with `ocsf.metadata.uid`.
+- OCSF bodies include command lines and process ancestry, and are **not** redacted.
+- Gap records (`event_name = 'openshell.ocsf.gap'`) report dropped events.
+
+```sql
+SELECT json_extract_string(body, '$.action') AS action,
+       json_extract_string(body, '$.dst_endpoint.hostname') AS host,
+       attrs['openshell.sandbox.id'] AS sandbox
+FROM read_parquet('<data-dir>/services/*/logs/**/*.parquet')
+WHERE attrs['ocsf.class_uid'] = '4001';
+```
+
+`quacktel env --openshell` should print the `gateway.toml` snippet when `env` lands in M5.
+
 ## Distribution
 
 **Until 1.0 (personal use):** build and install from source with
@@ -445,6 +483,8 @@ Not reused: Substrait, Participle SQL, and the custom executor.
   as instructions to an agent. Tool output labels log and span content as
   untrusted data, and the docs warn about it. Sender authentication (for
   example a per-service token) is a v0.2 candidate.
+- **No dedup on write:** a gateway retry (OpenShell) stores duplicate rows.
+  Deduplicate in queries, for example on `ocsf.metadata.uid`.
 - **Body content isn't redacted:** agent prompts and tool I/O are stored as
   received. Mitigations are clear docs, `0700` permissions and retention.
   Value scanning is a v0.2 candidate.

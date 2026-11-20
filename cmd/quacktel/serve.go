@@ -2,12 +2,15 @@ package main
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -22,7 +25,8 @@ import (
 
 type serveCmd struct {
 	Listen        string        `help:"OTLP/HTTP listen address." default:"${listen}"`
-	UnsafeBind    bool          `help:"Allow a non-loopback listen address."`
+	UnsafeBind    bool          `help:"Allow a non-loopback listen address. Implies --auth."`
+	Auth          bool          `help:"Require a bearer token, stored in <data-dir>/otlp-headers."`
 	DataDir       string        `help:"Data directory. Defaults to the per-user config dir." type:"path"`
 	MaxBody       int64         `help:"Maximum request body size in bytes, before and after decompression." default:"${max_body}"`
 	MaxInFlight   int           `name:"max-inflight" help:"Maximum concurrent requests before new ones get 429." default:"${max_inflight}"`
@@ -36,6 +40,7 @@ type statsFile struct {
 	RecordsAccepted int64     `json:"records_accepted"`
 	RecordsRejected int64     `json:"records_rejected"`
 	ValuesRedacted  int64     `json:"values_redacted"`
+	Unauthorized    int64     `json:"unauthorized"`
 	Responses429    int64     `json:"responses_429"`
 	MetricsDropped  int64     `json:"metrics_dropped"`
 	Flushes         int64     `json:"flushes"`
@@ -52,6 +57,16 @@ func (c *serveCmd) Run(ctx context.Context, globals *Globals) error {
 		if dir, err = paths.DataDir(); err != nil {
 			return err
 		}
+	}
+
+	var token string
+	if c.Auth || c.UnsafeBind {
+		headers := filepath.Join(dir, otlpHeadersFile)
+		var err error
+		if token, err = loadOrCreateOTLPHeaders(headers); err != nil {
+			return err
+		}
+		globals.Logger.InfoContext(ctx, "auth enabled", slog.String("headers_file", headers))
 	}
 
 	st, err := store.Open(ctx, store.Options{
@@ -82,6 +97,7 @@ func (c *serveCmd) Run(ctx context.Context, globals *Globals) error {
 		UnsafeBind:  c.UnsafeBind,
 		MaxBody:     c.MaxBody,
 		MaxInFlight: c.MaxInFlight,
+		Token:       token,
 		Logger:      globals.Logger,
 	}, sink)
 	if err != nil {
@@ -125,6 +141,7 @@ func saveStats(dir string, rs receiver.Stats, ss store.Stats, redacted int64) (e
 		RecordsAccepted: rs.RecordsAccepted,
 		RecordsRejected: rs.RecordsRejected,
 		ValuesRedacted:  redacted,
+		Unauthorized:    rs.Unauthorized,
 		Responses429:    rs.Responses429,
 		MetricsDropped:  rs.MetricsDropped,
 		Flushes:         ss.Flushes,
@@ -163,6 +180,71 @@ func saveStats(dir string, rs receiver.Stats, ss store.Stats, redacted int64) (e
 	}
 	if err := os.Rename(f.Name(), filepath.Join(dir, "stats.json")); err != nil {
 		return fmt.Errorf("failed to publish stats file: %w", err)
+	}
+
+	return nil
+}
+
+const otlpHeadersFile = "otlp-headers"
+
+var otlpHeadersFormat = regexp.MustCompile(`^authorization=Bearer ([0-9a-f]{64})\n$`)
+
+// loadOrCreateOTLPHeaders keeps the file across restarts, because the gateway reads it only at startup.
+func loadOrCreateOTLPHeaders(path string) (string, error) {
+	var raw [32]byte
+	_, _ = rand.Read(raw[:])
+	token := hex.EncodeToString(raw[:])
+	err := writeNewFile(path, []byte("authorization=Bearer "+token+"\n"))
+	if err == nil {
+		return token, nil
+	}
+	if !errors.Is(err, os.ErrExist) {
+		return "", err
+	}
+
+	info, err := os.Stat(path)
+	if err != nil {
+		return "", fmt.Errorf("failed to stat %s: %w", path, err)
+	}
+	if info.Mode().Perm()&^0o600 != 0 {
+		return "", fmt.Errorf("%s has mode %04o, want 0600 or stricter; run chmod 600 on it", path, info.Mode().Perm())
+	}
+	data, err := os.ReadFile(path) //nolint:gosec // fixed name inside the data dir
+	if err != nil {
+		return "", fmt.Errorf("failed to read %s: %w", path, err)
+	}
+	m := otlpHeadersFormat.FindStringSubmatch(string(data))
+	if m == nil {
+		return "", fmt.Errorf("%s is not in the form authorization=Bearer <64 hex characters>; delete it to create a new one", path)
+	}
+
+	return m[1], nil
+}
+
+// writeNewFile never leaves a partial file at path: the link fails with ErrExist if path already exists.
+func writeNewFile(path string, data []byte) (err error) {
+	dir := filepath.Dir(path)
+	if err := paths.EnsureDir(dir); err != nil {
+		return err
+	}
+	// CreateTemp makes the file 0600.
+	f, err := os.CreateTemp(dir, ".otlp-headers-*")
+	if err != nil {
+		return fmt.Errorf("failed to create temp file: %w", err)
+	}
+	defer func() { err = errors.Join(err, os.Remove(f.Name())) }()
+	_, err = f.Write(data)
+	if err == nil {
+		err = f.Sync()
+	}
+	if cerr := f.Close(); err == nil {
+		err = cerr
+	}
+	if err != nil {
+		return fmt.Errorf("failed to write %s: %w", path, err)
+	}
+	if err := os.Link(f.Name(), path); err != nil {
+		return fmt.Errorf("failed to create %s: %w", path, err)
 	}
 
 	return nil

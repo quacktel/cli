@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"compress/gzip"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -11,6 +12,8 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
+	"strings"
 	"sync"
 	"syscall"
 	"testing"
@@ -288,4 +291,136 @@ func TestServeRejectsLooseDataDir(t *testing.T) {
 	require.NoError(t, os.Chmod(dir, 0o755))
 	_, err := runBin(t, "serve", "--listen", "127.0.0.1:0", "--data-dir", dir)
 	require.Error(t, err)
+}
+
+func readToken(t *testing.T, dir string) string {
+	t.Helper()
+	raw, err := os.ReadFile(filepath.Join(dir, "otlp-headers"))
+	require.NoError(t, err)
+	m := regexp.MustCompile(`^authorization=Bearer ([0-9a-f]{64})\n$`).FindStringSubmatch(string(raw))
+	require.NotNil(t, m, string(raw))
+
+	return m[1]
+}
+
+func TestServeAuth(t *testing.T) {
+	dir := dataDir(t)
+	addr := freeAddr(t)
+	url := "http://" + addr + "/v1/logs"
+	body := []byte("{}")
+
+	p := startServe(t, addr, dir, "--auth")
+	info, err := os.Stat(filepath.Join(dir, "otlp-headers"))
+	require.NoError(t, err)
+	require.Equal(t, os.FileMode(0o600), info.Mode().Perm())
+	token := readToken(t, dir)
+	require.NotContains(t, p.stderr.String(), token)
+	require.Contains(t, p.stderr.String(), "otlp-headers")
+
+	require.Equal(t, http.StatusUnauthorized, post(t, url, "application/json", body))
+	require.Equal(t, http.StatusOK, post(t, url, "application/json", body, "Authorization", "Bearer "+token))
+	require.NoError(t, p.cmd.Process.Signal(syscall.SIGTERM))
+	require.NoError(t, p.wait(t), p.stderr.String())
+
+	raw, err := os.ReadFile(filepath.Join(dir, "stats.json"))
+	require.NoError(t, err)
+	var stats map[string]any
+	require.NoError(t, json.Unmarshal(raw, &stats))
+	require.EqualValues(t, 1, stats["unauthorized"])
+
+	p = startServe(t, addr, dir, "--auth")
+	require.Equal(t, token, readToken(t, dir))
+	require.Equal(t, http.StatusOK, post(t, url, "application/json", body, "Authorization", "Bearer "+token))
+	require.NoError(t, p.cmd.Process.Signal(syscall.SIGTERM))
+	require.NoError(t, p.wait(t), p.stderr.String())
+}
+
+func TestServeUnsafeBindImpliesAuth(t *testing.T) {
+	dir := dataDir(t)
+	addr := freeAddr(t)
+	p := startServe(t, addr, dir, "--unsafe-bind")
+	require.Equal(t, http.StatusUnauthorized, post(t, "http://"+addr+"/v1/logs", "application/json", []byte("{}")))
+	require.FileExists(t, filepath.Join(dir, "otlp-headers"))
+	require.NoError(t, p.cmd.Process.Signal(syscall.SIGTERM))
+	require.NoError(t, p.wait(t), p.stderr.String())
+}
+
+func TestServeRejectsBadHeadersFile(t *testing.T) {
+	tests := []struct {
+		name    string
+		content string
+		mode    os.FileMode
+	}{
+		{"corrupted", "authorization=Bearer short\n", 0o600},
+		{"wide mode", "authorization=Bearer " + strings.Repeat("a", 64) + "\n", 0o644},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dir := dataDir(t)
+			path := filepath.Join(dir, "otlp-headers")
+			require.NoError(t, os.WriteFile(path, []byte(tt.content), tt.mode))
+			require.NoError(t, os.Chmod(path, tt.mode))
+			_, err := runBin(t, "serve", "--auth", "--listen", "127.0.0.1:0", "--data-dir", dir)
+			require.Error(t, err)
+		})
+	}
+}
+
+func TestServeOpenShellOCSF(t *testing.T) {
+	fixture, err := os.ReadFile(filepath.Join("..", "..", "testdata", "openshell_ocsf_logs.json"))
+	require.NoError(t, err)
+	req := plogotlp.NewExportRequest()
+	require.NoError(t, req.UnmarshalJSON(fixture))
+	pb, err := req.MarshalProto()
+	require.NoError(t, err)
+	var buf bytes.Buffer
+	zw := gzip.NewWriter(&buf)
+	_, err = zw.Write(pb)
+	require.NoError(t, err)
+	require.NoError(t, zw.Close())
+
+	addr := freeAddr(t)
+	dir := dataDir(t)
+	p := startServe(t, addr, dir, "--auth")
+	auth := "Bearer " + readToken(t, dir)
+	// The second post simulates a gateway retry.
+	for range 2 {
+		require.Equal(t, http.StatusOK, post(t, "http://"+addr+"/v1/logs", "application/x-protobuf", buf.Bytes(),
+			"Content-Encoding", "gzip", "Authorization", auth))
+	}
+	require.NoError(t, p.cmd.Process.Signal(syscall.SIGTERM))
+	require.NoError(t, p.wait(t), p.stderr.String())
+
+	from := " FROM read_parquet('" + dir + "/services/*/logs/**/*.parquet') WHERE "
+	query := func(sql string) []map[string]any {
+		out, err := runBin(t, "query", "--data-dir", dir, "--format", "json", sql)
+		require.NoError(t, err)
+		var rows []map[string]any
+		require.NoError(t, json.Unmarshal([]byte(out), &rows))
+
+		return rows
+	}
+
+	// Duplicates are stored: the store does not dedupe gateway retries.
+	rows := query("SELECT count(*) AS n" + from + "service_name='openshell'")
+	require.EqualValues(t, 6, rows[0]["n"])
+	rows = query("SELECT count(DISTINCT attrs['ocsf.metadata.uid']) AS n" + from + "service_name='openshell'")
+	require.EqualValues(t, 2, rows[0]["n"])
+
+	rows = query( // DISTINCT collapses the duplicate retry rows, as a real query would.
+		"SELECT DISTINCT json_extract_string(body, '$.action') AS action, attrs['openshell.sandbox.id'] AS sb, event_name, attrs['ocsf.metadata.uid'] AS uid" +
+			from + "attrs['ocsf.class_uid'] = '4001' ORDER BY attrs['ocsf.metadata.uid'] LIMIT 2")
+	require.Len(t, rows, 2)
+	require.Equal(t, "Allowed", rows[0]["action"])
+	require.Equal(t, "Denied", rows[1]["action"])
+	for _, r := range rows {
+		require.Equal(t, "sb-test", r["sb"])
+	}
+
+	rows = query("SELECT event_name, attrs['openshell.ocsf.gap.dropped'] AS dropped, resource_attrs['openshell.sandbox.id'] AS sb" +
+		from + "event_name = 'openshell.ocsf.gap' LIMIT 1")
+	require.Len(t, rows, 1)
+	require.Equal(t, "openshell.ocsf.gap", rows[0]["event_name"])
+	require.Equal(t, "7", rows[0]["dropped"])
+	require.Equal(t, "sb-test", rows[0]["sb"])
 }

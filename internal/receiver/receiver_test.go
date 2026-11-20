@@ -64,6 +64,7 @@ func startWith(t *testing.T, opts receiver.Options, sink receiver.Sink) *fixture
 
 type req struct {
 	method, path, host, ctype, encoding, origin string
+	auth                                        []string
 	body                                        []byte
 }
 
@@ -92,6 +93,9 @@ func (f *fixture) do(t *testing.T, r req) result {
 	}
 	if r.origin != "" {
 		hr.Header.Set("Origin", r.origin)
+	}
+	for _, a := range r.auth {
+		hr.Header.Set("Authorization", a)
 	}
 	if r.host != "" {
 		hr.Host = r.host
@@ -363,4 +367,36 @@ func TestUnsafeBindHost(t *testing.T) {
 		cancel()
 		require.NoError(t, <-done)
 	}
+}
+
+func TestAuth(t *testing.T) {
+	const token = "0123456789abcdef"
+	f := startWith(t, receiver.Options{Addr: "127.0.0.1:0", Token: token}, nil)
+	body := sampleProto(t, 1)
+	tests := []struct {
+		name string
+		req  req
+		want int
+	}{
+		{"no header", req{body: body}, http.StatusUnauthorized},
+		{"wrong token", req{auth: []string{"Bearer nope"}, body: body}, http.StatusUnauthorized},
+		{"lowercase scheme", req{auth: []string{"bearer " + token}, body: body}, http.StatusUnauthorized},
+		{"bare token", req{auth: []string{token}, body: body}, http.StatusUnauthorized},
+		{"unauthorized before content type", req{ctype: "text/plain", body: body}, http.StatusUnauthorized},
+		{"origin before auth", req{origin: "http://evil.example", body: body}, http.StatusForbidden},
+		{"right token", req{auth: []string{"Bearer " + token}, body: body}, http.StatusOK},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			require.Equal(t, tt.want, f.do(t, tt.req).StatusCode)
+		})
+	}
+	require.Len(t, f.calls(), 1)
+	require.EqualValues(t, 5, f.srv.Stats().Unauthorized)
+}
+
+func TestNoTokenIgnoresAuthorization(t *testing.T) {
+	f := start(t, 0, nil)
+	require.Equal(t, http.StatusOK, f.do(t, req{auth: []string{"Bearer anything"}, body: sampleProto(t, 1)}).StatusCode)
+	require.Zero(t, f.srv.Stats().Unauthorized)
 }

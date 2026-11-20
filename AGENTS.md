@@ -60,6 +60,7 @@ The `cmd/quacktel` tests build and run the real binary.
 - Typed tools bind every user value as a parameter. Column and attribute names are validated against the schema, never interpolated unchecked.
 - MCP tool output marks telemetry content as untrusted data, because any local process can write it.
 - Data files and directories are created `0600` and `0700`.
+- When auth is on, the token is never logged, and the headers file is 0600 and validated at startup.
 - Logs go to stderr and results go to stdout.
 
 ## Code conventions

@@ -3,6 +3,7 @@ package receiver
 import (
 	"compress/gzip"
 	"context"
+	"crypto/subtle"
 	"errors"
 	"fmt"
 	"io"
@@ -38,6 +39,7 @@ type Options struct {
 	UnsafeBind  bool
 	MaxBody     int64
 	MaxInFlight int
+	Token       string
 	Logger      *slog.Logger
 }
 
@@ -47,6 +49,7 @@ type Stats struct {
 	RecordsRejected int64
 	Responses429    int64
 	MetricsDropped  int64
+	Unauthorized    int64
 }
 
 type Server struct {
@@ -57,8 +60,9 @@ type Server struct {
 	maxBody int64
 	slots   chan struct{}
 	hosts   map[string]struct{}
+	auth    []byte
 
-	requests, accepted, rejected, full, metrics atomic.Int64
+	requests, accepted, rejected, full, metrics, unauthorized atomic.Int64
 }
 
 // New validates the bind address and binds the listener, so a bad address fails before serving.
@@ -97,6 +101,9 @@ func New(opts Options, sink Sink) (*Server, error) {
 			net.JoinHostPort("localhost", port): {},
 			net.JoinHostPort("127.0.0.1", port): {},
 		},
+	}
+	if opts.Token != "" {
+		s.auth = []byte("Bearer " + opts.Token)
 	}
 	// Remote clients send the server's own address as Host, so an opted-in unsafe bind must allow it.
 	if opts.UnsafeBind {
@@ -146,6 +153,7 @@ func (s *Server) Stats() Stats {
 		RecordsRejected: s.rejected.Load(),
 		Responses429:    s.full.Load(),
 		MetricsDropped:  s.metrics.Load(),
+		Unauthorized:    s.unauthorized.Load(),
 	}
 }
 
@@ -166,6 +174,11 @@ func (s *Server) handle(w http.ResponseWriter, r *http.Request) {
 	}
 	if _, ok := s.hosts[r.Host]; !ok {
 		http.Error(w, "forbidden", http.StatusForbidden)
+		return
+	}
+	if s.auth != nil && subtle.ConstantTimeCompare([]byte(r.Header.Get("Authorization")), s.auth) != 1 {
+		s.unauthorized.Add(1)
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
 		return
 	}
 	mt, _, _ := mime.ParseMediaType(r.Header.Get("Content-Type"))
