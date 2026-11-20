@@ -1,0 +1,29 @@
+# yaml-language-server: $schema=https://goreleaser.com/static/schema.json
+version: 2
+
+project_name: quacktel
+
+builds:
+  - id: quacktel
+    main: ./cmd/quacktel
+    binary: quacktel
+    # DuckDB needs CGO, so each target is built natively on its own runner.
+    env:
+      - CGO_ENABLED=1
+    flags:
+      - -trimpath
+    ldflags:
+      - -s -w -X main.version={{.Version}} -X main.commit={{.Commit}} -X main.date={{.Date}}
+    targets:
+      - darwin_arm64
+      - linux_amd64
+      - linux_arm64
+
+archives:
+  - formats: [tar.gz]
+
+checksum:
+  name_template: checksums.txt
+
+changelog:
+  disable: true

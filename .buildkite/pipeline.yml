@@ -30,3 +30,23 @@ steps:
           - ./.buildkite/plugins/mise-cache: ~
           - ./.buildkite/plugins/go-cache:
               name: go_test
+
+  - group: ":package: build"
+    key: build
+    steps:
+      - label: ":goreleaser: build {{matrix}}"
+        agents:
+          queue: "{{matrix}}"
+        matrix:
+          - macos-medium
+          - linux-small
+          - linux-arm64-small
+        retry:
+          automatic:
+            - exit_status: 75
+              limit: 2
+        command: goreleaser build --snapshot --single-target --clean
+        plugins:
+          - ./.buildkite/plugins/mise-cache: ~
+          - ./.buildkite/plugins/go-cache:
+              name: go_build

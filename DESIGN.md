@@ -615,8 +615,10 @@ WHERE attrs['ocsf.class_uid'] = '4001';
 `go install ./cmd/quacktel`, wrapped as a mise task. The only requirement is the
 Xcode command-line tools for CGO: `duckdb-go` ships prebuilt static DuckDB
 libraries, so DuckDB isn't compiled locally. CI lints and tests on a macOS
-arm64 runner and doesn't publish anything. Everything below is the pre-1.0
-release plan (M6/M7).
+arm64 runner, runs a goreleaser snapshot build (`goreleaser build --snapshot
+--single-target`) natively on macOS arm64, Linux amd64 and Linux arm64 runners
+to prove the CGO link early, and doesn't publish anything. Everything below is
+the pre-1.0 release plan (M6/M7).
 
 DuckDB needs CGO, so every target is built natively. There is no cross-compiling.
 
