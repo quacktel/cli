@@ -1,0 +1,42 @@
+{
+  "resourceLogs": [
+    {
+      "resource": {
+        "attributes": [
+          {"key": "service.name", "value": {"stringValue": "claude-code"}},
+          {"key": "service.version", "value": {"stringValue": "0.0.0-test"}}
+        ]
+      },
+      "scopeLogs": [
+        {
+          "scope": {"name": "com.anthropic.claude_code.events"},
+          "logRecords": [
+            {
+              "timeUnixNano": "1780000000000000000",
+              "eventName": "claude_code.user_prompt",
+              "attributes": [
+                {"key": "session.id", "value": {"stringValue": "sess-test-1"}},
+                {"key": "prompt_length", "value": {"intValue": "42"}},
+                {"key": "event.name", "value": {"stringValue": "user_prompt"}}
+              ]
+            },
+            {
+              "timeUnixNano": "1780000001000000000",
+              "eventName": "claude_code.api_request",
+              "body": {"stringValue": "synthetic api request"},
+              "traceId": "0123456789abcdef0123456789abcdef",
+              "spanId": "0123456789abcdef",
+              "attributes": [
+                {"key": "session.id", "value": {"stringValue": "sess-test-1"}},
+                {"key": "model", "value": {"stringValue": "test-model"}},
+                {"key": "cost_usd", "value": {"doubleValue": 0.0123}},
+                {"key": "input_tokens", "value": {"intValue": "100"}},
+                {"key": "api_key", "value": {"stringValue": "sk-test-not-a-real-key"}}
+              ]
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

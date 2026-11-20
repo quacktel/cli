@@ -9,10 +9,13 @@ import (
 	"os/signal"
 	"runtime"
 	"runtime/debug"
+	"strconv"
 	"syscall"
 
 	"github.com/alecthomas/kong"
 	"github.com/lmittmann/tint"
+
+	"github.com/quacktel/cli/internal/receiver"
 )
 
 // Set by ldflags at release time.
@@ -32,6 +35,7 @@ type cli struct {
 	Globals
 
 	Version versionCmd `cmd:"" help:"Print version information."`
+	Serve   serveCmd   `cmd:"" help:"Run the OTLP receiver and write logs to Parquet."`
 	Query   queryCmd   `cmd:"" help:"Run a read-only SQL query over stored telemetry."`
 }
 
@@ -98,6 +102,10 @@ func run() error {
 		kong.Name("quacktel"),
 		kong.Description("Local OTLP to Parquet store with MCP query. Results go to stdout; logs go to stderr."),
 		kong.Writers(os.Stdout, os.Stderr),
+		kong.Vars{
+			"listen":   receiver.DefaultAddr,
+			"max_body": strconv.Itoa(receiver.DefaultMaxBody),
+		},
 	)
 	if err != nil {
 		return fmt.Errorf("failed to build CLI: %w", err)

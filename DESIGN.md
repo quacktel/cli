@@ -47,14 +47,14 @@ quacktel version
 | First users | Apps under development, and coding agents' own telemetry | Agent debugging plus agent self-analysis. |
 | Signals | Logs and traces | Highest value for debugging; metrics deferred. |
 | Platforms | M0–M6: macOS arm64 only. M7: add Linux amd64 and arm64. macOS amd64 is out of scope | Keeps the first phases tight: one runner and one service manager. Platform-specific code (paths, service) sits behind a small interface so Linux can be added without touching the rest. |
-| Transport | OTLP/HTTP only: protobuf and JSON, gzip accepted | One endpoint to harden. Users set `OTEL_EXPORTER_OTLP_PROTOCOL=http/protobuf`. |
+| Transport | OTLP/HTTP only: protobuf and JSON, gzip accepted, both decoded with `go.opentelemetry.io/collector/pdata` v1.71.0 | One endpoint to harden. Users set `OTEL_EXPORTER_OTLP_PROTOCOL=http/protobuf`. |
 | Engine | DuckDB via `duckdb-go` v2.20000.0 (DuckDB 2.0.0 LTS), statically linked, used only on the read path | Full SQL with no runtime extensions. |
 | Writer | arrow-go `pqarrow` | Reuses the parquet-arrow-search pattern and keeps the daemon free of DuckDB. |
 | Write path | Tail → seal → compact, with a manifest | ≤ ~1–5s staleness without DuckDB lock contention. |
 | Attributes | Promoted columns plus `MAP(VARCHAR, VARCHAR)` | Fast filters on hot keys; stable schema. |
 | Query path | Typed MCP tools → prepared SQL with bound parameters, plus a read-only `sql` tool | No injection surface in typed tools. |
 | Scope | One store per user, physically partitioned by service. `mcp` sees all services by default; `mcp --service` is enforced by DuckDB's `allowed_directories` | Allows cross-service queries by default; scoping later needs no data migration. |
-| Redaction | Key-pattern masking, on by default, configurable | Cheap and predictable. |
+| Redaction | Key-pattern masking, on by default; extra patterns come with `config.toml` (deferred) | Cheap and predictable. |
 | Retention | 30 days or 10 GB, whichever is hit first | Enough history for agents to analyse usage and cost trends. |
 | Onboarding | Docs plus `quacktel env` | Nothing writes to another tool's config. |
 | Distribution | Until 1.0: build from source (`go install`). Pre-1.0 release (M6): Homebrew and `install.sh` with attestation check; .deb/.rpm with Linux (M7) | Personal use until 1.0, so no release pipeline yet. | See [Distribution](#distribution). |
@@ -109,7 +109,18 @@ data/
         hour.parquet                  # final merge once the hour is closed
       spans/date=…/hour=…/…
   .tmp/                               # in-progress writes; never read
+  .lock                               # flock held by the running serve
+  stats.json                          # counters for doctor, rewritten atomically
 ```
+
+**Partitions.** `date=`/`hour=` use the **receive time** (UTC), never the record
+time, so skewed or hostile timestamps can't write into old partitions. The
+manifest keeps each file's min/max record time for readers.
+
+**One serve per data dir.** `serve` takes an exclusive flock on `.lock` and
+refuses to start if it is held. On startup it reconciles files the manifest
+doesn't list (for example after a crash between rename and publish) into the
+manifest.
 
 **Service directories.** `service.name` is untrusted input, so it is never used
 as a path as-is:
@@ -144,7 +155,8 @@ The compaction targets (sealed every ~5 min, hourly after the hour closes,
 
 ### Schema v1
 
-Timestamps are `TIMESTAMP_NS` UTC; IDs are lowercase hex `VARCHAR`. Attribute
+Timestamps are tz-less `TIMESTAMP_NS`, UTC by convention, because duckdb-go
+v2.20000.0 can't scan `TIMESTAMPTZ_NS`; IDs are lowercase hex `VARCHAR`. Attribute
 values are stringified. Arrays and maps in attributes are JSON-encoded strings.
 
 **logs**
@@ -154,11 +166,12 @@ values are stringified. Arrays and maps in attributes are JSON-encoded strings.
 | `time`, `observed_time` | TIMESTAMP_NS | LogRecord |
 | `service_name` | VARCHAR | resource `service.name` |
 | `severity_number`, `severity_text` | INT32, VARCHAR | LogRecord |
-| `event_name` | VARCHAR | LogRecord `event_name` (Claude Code events) |
+| `event_name` | VARCHAR | LogRecord event name, falling back to attribute `event.name` |
+| `session_id` | VARCHAR | attribute `session.id` |
 | `body` | VARCHAR | AnyValue; JSON-encoded if not a string |
 | `trace_id`, `span_id` | VARCHAR | LogRecord |
 | `scope_name`, `scope_version` | VARCHAR | InstrumentationScope |
-| `resource_attrs`, `attrs` | MAP(VARCHAR, VARCHAR) | remaining attributes |
+| `resource_attrs`, `attrs` | MAP(VARCHAR, VARCHAR) | all attributes (promoted keys are copied, not removed) |
 
 **spans**
 
@@ -175,10 +188,9 @@ values are stringified. Arrays and maps in attributes are JSON-encoded strings.
 | `events` | LIST(STRUCT(time, name, attrs MAP)) | Span events (exceptions) |
 | `links` | LIST(STRUCT(trace_id, span_id, attrs MAP)) | Span links |
 
-**Promoted keys.** A small fixed set (for example `http.request.method`,
-`http.response.status_code`, `gen_ai.request.model`, `user.id`/`session.id` for
-agent sessions) is to be finalised in M1 from real Claude Code and SDK samples.
-Any change to the promoted set bumps the schema version, recorded in Parquet
+**Promoted keys.** Logs promote `event_name` and `session_id`, copied from the
+record and left in `attrs`. Span keys (for example `http.request.method`,
+`http.response.status_code`, `gen_ai.request.model`) are finalised in M2. Any change to the promoted set bumps the schema version, recorded in Parquet
 key-value metadata and in the manifest. Readers union schema versions by column
 name (`union_by_name`).
 
@@ -190,9 +202,11 @@ name (`union_by_name`).
 - Require `Host` to be `localhost:4318` or `127.0.0.1:4318` (DNS-rebinding defence).
 - Require `Content-Type` to be `application/x-protobuf` or `application/json`.
   Browsers must preflight these, and preflights are never answered.
-- Accept only `POST /v1/logs` and `/v1/traces`. `/v1/metrics` returns
-  `200` and drops the data, counted in `doctor`, so exporters that
-  also send metrics (Claude Code) don't log errors. **Open:** 200-and-drop vs 404.
+- Accept only `POST /v1/logs` (and `/v1/traces` from M2; it returns `404` until
+  then). `/v1/metrics` returns `200` and drops the data, counted in `doctor`, so
+  exporters that also send metrics (Claude Code) don't log errors.
+- With `--unsafe-bind` on a non-loopback address, the bound `host:port` is also
+  an allowed `Host`, since remote clients send it. No other gate changes.
 - Cap the request body (default 8 MiB) and the decompressed size (gzip-bomb
   defence).
 - Bound the buffer. When full, return `429` with `Retry-After`, which OTLP
@@ -207,10 +221,12 @@ name (`union_by_name`).
   **keys** match case-insensitive globs: `*authorization*`, `*cookie*`,
   `*token*`, `*secret*`, `*password*`, `*api_key*`, `*apikey*`, `*credential*`.
   The value becomes `[REDACTED]`.
-- Patterns are extendable and can be allow-listed in `config.toml`.
+- Keys are case-folded and `-` is folded to `_`, so `X-API-KEY` matches `*api_key*`.
+- `config.toml` is deferred. M1 uses flags plus the built-in globs.
 - **Limitation:** log bodies and free-text values are not scanned. Prompts,
   tool inputs and file contents sent by agents (for example Claude Code with
-  `OTEL_LOG_USER_PROMPTS=1`) are stored as received. The docs must say this
+  `OTEL_LOG_USER_PROMPTS=1`) are stored as received. Claude Code also sends
+  `user.email` on events, and it isn't masked. The docs must say this
   plainly. Value scanning is a v0.2 candidate.
 
 ## Read path
@@ -432,11 +448,13 @@ Not reused: Substrait, Participle SQL, and the custom executor.
 - **CGO release cost:** one native build in M6. M7 adds two
   Linux builds and the choice of oldest supported glibc. M0 de-risks the macOS
   path before any feature work.
-- **Binary size** is 79 MB unstripped and 62 MB with `-ldflags='-s -w'` (darwin/arm64, measured in M0); acceptable.
+- **Binary size** is 121 MB unstripped and 90 MB with `-ldflags='-s -w'` (darwin/arm64, measured in M1; M0 was 79 MB and 62 MB); acceptable.
+- **Flush blocks requests:** `Flush` holds the store lock while writing Parquet,
+  so requests wait during a flush. M3 should swap buffers and write outside the lock.
+- **A failed flush drops that batch's rows** (logged). M3 should retry.
 - **Stringified attribute values** lose types (numeric comparisons need a
   `CAST`). Typed tools hide this; the `sql` tool docs must mention it.
-- **`/v1/metrics` behaviour:** 200-and-drop vs 404 is still open.
-- **The promoted-key set** is finalised in M1 from real samples.
+- **The span promoted-key set** is finalised in M2 from real samples.
 - **No notarisation:** browser downloads trigger a Gatekeeper block, and
   there's no Apple-backed identity on the binary. Mitigations: the Homebrew
   and `install.sh` paths, plus GitHub attestations. Revisit if users hit this

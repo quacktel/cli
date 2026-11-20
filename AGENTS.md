@@ -49,6 +49,8 @@ The `cmd/quacktel` tests build and run the real binary.
 - Only the OTLP receiver listens, and only on loopback, unless `--unsafe-bind` is given. Never add a query listener; MCP is stdio only.
 - The receiver rejects requests that carry `Origin`, a `Host` other than `localhost` or `127.0.0.1` on the receiver's port, or a content type other than `application/x-protobuf` or `application/json`. Body and decompressed sizes are capped. A full buffer returns `429`, and nothing grows without bound.
 - Redaction runs before anything is buffered or written.
+- One `quacktel serve` per data dir, enforced by a flock on `.lock`.
+- Partitions use receive time, never record time, so skewed timestamps can't write into old partitions.
 - `service.name` is untrusted. It reaches the filesystem only as the slug and hash directory name, never as a path itself.
 - Every file is written to `.tmp`, fsynced, then renamed into place. Nothing is written in place, and that includes manifests.
 - Readers open only the files a manifest lists, never a glob. A file a manifest stops listing is unlinked only after the grace period.

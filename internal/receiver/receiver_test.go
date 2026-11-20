@@ -275,3 +275,41 @@ func TestBind(t *testing.T) {
 	require.True(t, strings.HasPrefix(s.Addr(), "127.0.0.1:") || strings.HasPrefix(s.Addr(), "[::1]:"))
 	require.NoError(t, s.Serve(ctx))
 }
+
+func TestUnsafeBindHost(t *testing.T) {
+	// macOS has no 127.0.0.2 alias, so fall back to the IPv6 loopback, which is also outside the default Host set.
+	host := ""
+	for _, h := range []string{"127.0.0.2", "::1"} {
+		if ln, err := (&net.ListenConfig{}).Listen(t.Context(), "tcp", net.JoinHostPort(h, "0")); err == nil {
+			require.NoError(t, ln.Close())
+			host = h
+			break
+		}
+	}
+	if host == "" {
+		t.Skip("no alternate loopback address available")
+	}
+
+	for _, unsafe := range []bool{true, false} {
+		sink := func(context.Context, plog.Logs) (int64, string, error) { return 0, "", nil }
+		srv, err := receiver.New(receiver.Options{Addr: net.JoinHostPort(host, "0"), UnsafeBind: unsafe}, sink)
+		require.NoError(t, err)
+		f := &fixture{srv: srv}
+		ctx, cancel := context.WithCancel(t.Context())
+		done := make(chan error, 1)
+		go func() { done <- srv.Serve(ctx) }()
+
+		_, p, _ := net.SplitHostPort(srv.Addr())
+		resp := f.do(t, req{host: net.JoinHostPort(host, p), body: sampleProto(t, 1)})
+		if unsafe {
+			require.Equal(t, http.StatusOK, resp.StatusCode)
+		} else {
+			require.Equal(t, http.StatusForbidden, resp.StatusCode)
+		}
+		resp = f.do(t, req{host: "evil.example:" + p, body: sampleProto(t, 1)})
+		require.Equal(t, http.StatusForbidden, resp.StatusCode)
+
+		cancel()
+		require.NoError(t, <-done)
+	}
+}

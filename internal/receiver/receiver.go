@@ -91,6 +91,10 @@ func New(opts Options, sink Sink) (*Server, error) {
 			net.JoinHostPort("127.0.0.1", port): {},
 		},
 	}
+	// Remote clients send the server's own address as Host, so an opted-in unsafe bind must allow it.
+	if opts.UnsafeBind {
+		s.hosts[net.JoinHostPort(host, port)] = struct{}{}
+	}
 	s.srv = &http.Server{
 		Handler:           http.HandlerFunc(s.handle),
 		ReadHeaderTimeout: 5 * time.Second,
