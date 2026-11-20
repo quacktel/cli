@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 )
 
 func DataDir() (string, error) {
@@ -34,3 +35,8 @@ func EnsureDir(path string) error {
 
 	return nil
 }
+
+// OTLPHeadersFile is shared so serve, env and doctor agree on one name and format.
+const OTLPHeadersFile = "otlp-headers"
+
+var OTLPHeadersFormat = regexp.MustCompile(`^authorization=Bearer ([0-9a-f]{64})\n$`)

@@ -16,7 +16,8 @@ import (
 // Runner runs launchctl with args and returns its combined output.
 type Runner func(ctx context.Context, args ...string) ([]byte, error)
 
-func defaultRunner(ctx context.Context, args ...string) ([]byte, error) {
+// DefaultRunner runs the real launchctl.
+func DefaultRunner(ctx context.Context, args ...string) ([]byte, error) {
 	return exec.CommandContext(ctx, "/bin/launchctl", args...).CombinedOutput() //nolint:gosec // fixed binary; args are built by Manager, not user input
 }
 
@@ -51,7 +52,7 @@ func (m *Manager) target() string { return "gui/" + strconv.Itoa(m.UID) + "/" + 
 
 func (m *Manager) run(ctx context.Context, args ...string) ([]byte, error) {
 	if m.Run == nil {
-		return defaultRunner(ctx, args...)
+		return DefaultRunner(ctx, args...)
 	}
 
 	return m.Run(ctx, args...)

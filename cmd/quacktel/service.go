@@ -47,23 +47,45 @@ type serveProbe struct {
 	Serve serveCmd `cmd:""`
 }
 
-func validateServeArgs(args []string) error {
+// parseServeArgs applies serve's own parsing and validation to flags that will run unattended.
+func parseServeArgs(args []string) (serveCmd, error) {
 	var probe serveProbe
 	parser, err := kong.New(&probe, kong.Name("quacktel"), kong.NoDefaultHelp(), kong.Writers(io.Discard, io.Discard), kongVars())
 	if err != nil {
-		return fmt.Errorf("failed to build serve parser: %w", err)
+		return serveCmd{}, fmt.Errorf("failed to build serve parser: %w", err)
 	}
 	if _, err := parser.Parse(append([]string{"serve", "--auth"}, args...)); err != nil {
-		return fmt.Errorf("invalid serve arguments: %w", err)
+		return serveCmd{}, fmt.Errorf("invalid serve arguments: %w", err)
 	}
 	if err := probe.Serve.validate(); err != nil {
-		return err
+		return serveCmd{}, err
 	}
 	if _, err := receiver.CheckAddr(probe.Serve.Listen, probe.Serve.UnsafeBind); err != nil {
-		return err
+		return serveCmd{}, err
 	}
 
-	return nil
+	return probe.Serve, nil
+}
+
+func validateServeArgs(args []string) error {
+	_, err := parseServeArgs(args)
+
+	return err
+}
+
+// withDataDir swaps the value of --data-dir for abs, because launchd runs with cwd / and a relative path would move the store.
+func withDataDir(args []string, abs string) []string {
+	out := slices.Clone(args)
+	for i, a := range out {
+		switch {
+		case a == "--data-dir" && i+1 < len(out):
+			out[i+1] = abs
+		case strings.HasPrefix(a, "--data-dir="):
+			out[i] = "--data-dir=" + abs
+		}
+	}
+
+	return out
 }
 
 func (c *serviceInstallCmd) Run(ctx context.Context, globals *Globals, w io.Writer) error {
@@ -72,8 +94,12 @@ func (c *serviceInstallCmd) Run(ctx context.Context, globals *Globals, w io.Writ
 	if len(passthrough) > 0 && passthrough[0] == "--" {
 		passthrough = passthrough[1:]
 	}
-	if err := validateServeArgs(passthrough); err != nil {
+	probe, err := parseServeArgs(passthrough)
+	if err != nil {
 		return err
+	}
+	if probe.DataDir != "" {
+		passthrough = withDataDir(passthrough, probe.DataDir)
 	}
 	exe, err := executablePath()
 	if err != nil {

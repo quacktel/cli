@@ -11,7 +11,6 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
-	"regexp"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -37,7 +36,7 @@ type serveCmd struct {
 	MaxServices   int           `help:"Maximum number of distinct services." default:"256"`
 
 	Retention       time.Duration `help:"Delete data older than this, in whole hourly partitions." default:"720h"`
-	MaxDisk         int64         `help:"Maximum bytes of Parquet on disk; the oldest closed hours are deleted first." default:"10737418240"`
+	MaxDisk         int64         `help:"Maximum bytes of Parquet on disk; the oldest closed hours are deleted first." default:"${max_disk}"`
 	CompactInterval time.Duration `help:"How often compaction and retention run." default:"5m"`
 	SealMinFiles    int           `help:"Tail files in the open hour that trigger a seal. Must be at least 2." default:"10"`
 	RetireGrace     time.Duration `help:"How long a replaced or expired file stays on disk for running queries." default:"60s"`
@@ -278,9 +277,9 @@ func saveStats(dir string, sf statsFile) (err error) {
 	return nil
 }
 
-const otlpHeadersFile = "otlp-headers"
+const otlpHeadersFile = paths.OTLPHeadersFile
 
-var otlpHeadersFormat = regexp.MustCompile(`^authorization=Bearer ([0-9a-f]{64})\n$`)
+var otlpHeadersFormat = paths.OTLPHeadersFormat
 
 // loadOrCreateOTLPHeaders keeps the file across restarts, because the gateway reads it only at startup.
 func loadOrCreateOTLPHeaders(path string) (string, error) {

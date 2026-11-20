@@ -434,19 +434,63 @@ It uses the same connection and guardrails as `sql`.
 
 ## Background service
 
-- **macOS:** `service install` writes a per-user LaunchAgent at
-  `~/Library/LaunchAgents/dev.quacktel.serve.plist` (never a root
-  LaunchDaemon) and loads it with `launchctl bootstrap gui/$UID`. The plist
-  records the absolute path of the running binary (e.g. `~/go/bin/quacktel`),
-  so a source install works. After rebuilding, run `service restart`.
-  Once released, Homebrew users can use `brew services` instead.
+- **macOS:** `service install|uninstall|restart|status` manage a per-user
+  LaunchAgent at `~/Library/LaunchAgents/dev.quacktel.serve.plist` (never a root
+  LaunchDaemon; `--label` is hidden and used by tests). The plist is rendered
+  through `encoding/xml` and written atomically with mode 0644. Its keys:
+  - `Label`
+  - `ProgramArguments`: `[<bin>, "--log-file", "<home>/Library/Logs/quacktel/serve.log", "serve", "--auth", <passthrough...>]`,
+    with the absolute path of the running binary (e.g. `~/go/bin/quacktel`)
+  - `RunAtLoad` is `<true/>`
+  - `KeepAlive` is `{SuccessfulExit: <false/>}`, so a crash restarts but a clean
+    exit doesn't
+  - `ThrottleInterval` 30
+  - `ProcessType` `Background`
+  - `StandardOutPath` and `StandardErrorPath`: `<home>/Library/Logs/quacktel/launchd.log`,
+    the launchd crash log
+- launchd needs self-closing `<true/>` and `<false/>`. `<true></true>` makes
+  `bootstrap` fail with "Bootstrap failed: 5", and `plutil` doesn't catch it, so
+  `Render` rewrites them.
+- **Domain:** the agent loads into `gui/<uid>`.
+  - `install` writes the plist, runs `bootout` (ignoring failure, so a stale
+    loaded copy doesn't block it), then `bootstrap`. Running it again upgrades
+    the agent in place.
+  - `restart` runs `kickstart -k`, which is needed after rebuilding the binary.
+  - `uninstall` runs `bootout` and removes the plist.
+  - `status` parses `launchctl print`.
+- **Passthrough:** flags after `--` go to `serve`. They are checked up front by
+  parsing them into `serveCmd`, running `validate()` and `receiver.CheckAddr`,
+  so a typo fails at install, not at the first launchd restart. The agent always
+  runs with `--auth`, because it has no terminal to prompt on. A relative
+  `--data-dir` is recorded as an absolute path, because launchd runs with cwd `/`.
+- **Logs:** `--log-file` writes `serve.log` rotated at 10 MiB, keeping 3 old
+  files. launchd's own capture (`launchd.log`) holds crashes that happen before
+  the logger starts.
 - **Linux (M7):** `service install` writes a `systemd --user` unit to
   `~/.config/systemd/user/quacktel.service` and enables it. The .deb/.rpm
   packages ship the unit in `/usr/lib/systemd/user/` but don't enable it.
-- `service status` and `doctor` check: the service is loaded, the port is bound
-  by quacktel, data-dir permissions, disk use against the cap, manifest
-  health, and dropped, 429 and metrics-drop counters (from a small `stats.json`
-  written by the daemon).
+
+### Doctor
+
+`quacktel doctor [--data-dir] [--listen] [--max-disk] [--json]` prints a
+`STATUS CHECK DETAIL` table (or a JSON array of `{name, status, detail}`) and
+exits 1 if any check fails. Without flags it uses the installed agent's
+recorded `--data-dir`, `--listen` and `--max-disk`; flags given explicitly win.
+It never mutates state; the flock probe releases immediately. Checks, in order:
+
+1. `data_dir`: exists with mode 0700.
+2. `auth_headers`: `otlp-headers`, if present, is 0600 and well formed; absent
+   means auth is off.
+3. `serve_lock`: the flock on `.lock` is held, so a `serve` owns the data dir.
+4. `receiver`: `GET /v1/logs` returns 405 with `Allow: POST`.
+5. `service`: the plist's binary exists and matches the running one (warn if
+   not), and launchd reports the agent loaded and running.
+6. `stats`: `write_errors` or `disk_cap_exceeded` fail; `pending_batches` or
+   `responses_429` warn. The counters reset when `serve` restarts.
+7. `disk`: warns at 80% of `--max-disk`.
+8. `manifests`: every manifest parses and lists only existing files; unlisted
+   Parquet files warn.
+9. `read_path`: the engine opens and counts rows in `logs` and `spans`.
 
 ## Onboarding
 
@@ -473,6 +517,15 @@ export OTEL_METRICS_EXPORTER=none
   ```json
   {"mcpServers": {"quacktel": {"command": "/abs/path/quacktel", "args": ["mcp"]}}}
   ```
+
+Onboarding on macOS is four commands:
+
+```sh
+quacktel service install
+eval "$(quacktel env --claude-code --auth)"
+claude mcp add quacktel -- "$(command -v quacktel)" mcp
+quacktel doctor
+```
 
 Run `quacktel serve` once before `quacktel mcp`, because `serve` creates the data
 dir and `mcp` exits if it is missing. `mcp` logs at Warn by default (`--debug`
@@ -603,7 +656,7 @@ Not reused: Substrait, Participle SQL, and the custom executor.
 | M2 (done) | Spans writer | A Go/Node sample app's traces land and can be queried. |
 | M3 (done) | Compaction + retention (including removal of expired service directories) + size cap | A 24h soak shows a bounded file count, no duplicate rows, and the cap enforced. |
 | M4 (done) | `engine`, `tools`, `mcp`, `query` | All six tools work against fixtures; the SELECT guard rejects the bypass corpus; a scoped session can't read another service's files through `sql`/`read_parquet`. |
-| M5 | `service` (launchd), `doctor` | Install, reboot, data still flowing, on macOS. |
+| M5 (done) | `service` (launchd), `doctor` | Install, reboot, data still flowing, on macOS. |
 | M6 | Pre-1.0 release: goreleaser, GitHub attestations, SBOM, Homebrew tap, `install.sh` | A release binary, installed via the tap formula and via `install.sh` on a clean Mac, runs with no Gatekeeper prompt and passes `gh attestation verify`. Decide on notarisation. |
 | M7 | Linux amd64/arm64: XDG paths, systemd user unit, .deb/.rpm, `install.sh` Linux support | Native builds on the oldest supported glibc; install, reboot, data still flowing, on Ubuntu and Fedora. |
 
@@ -619,7 +672,20 @@ telemetry pointed at it, then check:
 - Each closed hour holds exactly one file per (service, signal).
 - `SELECT count(*) FROM logs` is the same before and after a `serve` restart.
 
+### M5 exit check
+
+Run by hand on macOS: `quacktel service install`, reboot, then confirm
+`quacktel doctor` passes and `quacktel query "SELECT count(*) FROM logs"` grows
+after using Claude Code.
+
 ## Risks and open questions
+
+- **launchd domain:** the agent loads into `gui/<uid>`, which needs a login
+  session. A headless `user/<uid>` mode is future work.
+- **`brew services`** arrives in M6; until then `service install` is the only
+  way to run at login.
+- **Doctor counters reset on restart:** `stats` and `disk` reflect only the
+  current `serve` process.
 
 - **Cross-service visibility:** an unscoped `mcp` session can read every
   project's telemetry, including prompts. This is the accepted default for v0.1.

@@ -43,6 +43,7 @@ type cli struct {
 	Query   queryCmd   `cmd:"" help:"Run a read-only SQL query over stored telemetry."`
 	Env     envCmd     `cmd:"" help:"Print shell exports or MCP config for pointing apps at quacktel."`
 	Service serviceCmd `cmd:"" help:"Manage the launchd agent that runs quacktel serve."`
+	Doctor  doctorCmd  `cmd:"" help:"Check that the receiver, service, data dir and read path are healthy."`
 	MCP     mcpCmd     `cmd:"" name:"mcp" help:"Serve stored telemetry to agents over MCP on stdio."`
 }
 
@@ -93,6 +94,10 @@ func buildInfo() (string, string) {
 
 func main() {
 	if err := run(); err != nil {
+		// The table or JSON already reported the failing checks.
+		if errors.Is(err, errChecksFailed) {
+			os.Exit(1)
+		}
 		slog.New(tint.NewTextHandler(os.Stderr, &tint.Options{
 			NoColor: os.Getenv("NO_COLOR") != "",
 		})).Error("quacktel failed", slog.Any("error", err))
@@ -120,6 +125,7 @@ func kongVars() kong.Vars {
 	return kong.Vars{
 		"listen":        receiver.DefaultAddr,
 		"max_body":      strconv.Itoa(receiver.DefaultMaxBody),
+		"max_disk":      strconv.FormatInt(defaultMaxDisk, 10),
 		"max_inflight":  strconv.Itoa(receiver.DefaultMaxInFlight),
 		"service_label": service.DefaultLabel,
 	}
@@ -162,6 +168,7 @@ func run() (retErr error) {
 
 	kctx.BindTo(ctx, (*context.Context)(nil))
 	kctx.Bind(&args.Globals)
+	kctx.Bind(kctx)
 	kctx.BindTo(os.Stdout, (*io.Writer)(nil))
 
 	return kctx.Run()
