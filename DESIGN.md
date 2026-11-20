@@ -155,13 +155,19 @@ as a path as-is:
    are listed by the next publish. Pending bytes count toward the buffer cap, so
    a failing disk ends in `429`, and `write_errors` counts the failures.
 3. **Compaction**, every `--compact-interval` (default 5m):
-   - **Open hour:** once a partition holds `--seal-min-files` tails (default
-     10), they are merged into one `sealed-<ulid>.parquet`.
+   - **Open hour:** one merge per partition per pass. Once a partition holds
+     `--seal-min-files` sealed files (default 10), every file in it (sealed and
+     tails) is merged into one new `sealed-<ulid>.parquet`. Otherwise, once it
+     holds that many tails, the tails are merged into one `sealed-<ulid>.parquet`.
+     The sealed check comes first so steady traffic can't starve it. After a
+     pass the open hour holds at most `--seal-min-files` sealed files, plus the
+     tails flushed since.
    - **Closed hour:** once `hourEnd + 2×FlushInterval` has passed, every file in
      the partition is merged into one `hour-<ulid>.parquet`, so late tails are
      included.
    - A merge streams the sources through a `pqarrow` writer with `WriteBuffered`
-     and 1M-row row groups, so memory stays flat. It runs outside the store lock.
+     and 128Ki-row row groups, so memory stays at a batch plus one row group
+     (tens of MB for typical rows). It runs outside the store lock.
      The manifest is published with the merged file replacing its sources.
      Sources whose schema metadata differs are skipped with a warning.
 4. **Retention**, in the same housekeeping step as compaction; see below.
@@ -183,8 +189,9 @@ manifest.
 Housekeeping retires files whose hour partition ended more than `--retention`
 ago (default 720h). It then enforces `--max-disk` (default 10 GiB): while the
 listed bytes exceed the cap, the oldest whole (service, signal, hour) partition
-goes first. The open hour is never retired, so the cap can be exceeded by the
-open hour alone, which logs a warning. Retired files follow the same grace
+goes first. The open hour is never deleted. If only the open hour is left over
+the cap, the store refuses new writes (`429`, and `stats.json` shows
+`disk_cap_exceeded`) until the hour closes and retention frees space. Retired files follow the same grace
 period as compaction. A service with no files and no activity since startup has
 its directory removed.
 
@@ -251,7 +258,7 @@ name (`union_by_name`).
 opens the store or listens.
 
 `stats.json` also carries `compactions`, `files_retired`, `bytes_on_disk`,
-`pending_batches` and `write_errors`. It is rewritten only when a counter
+`pending_batches`, `write_errors` and `disk_cap_exceeded`. It is rewritten only when a counter
 changes (never for `updated_at` alone), once at startup and once at shutdown.
 
 ## Receiver hardening
@@ -548,6 +555,8 @@ Not reused: Substrait, Participle SQL, and the custom executor.
 M3 exit check, run by hand: run `quacktel serve` for 24h with Claude Code
 telemetry pointed at it, then check:
 
+- Counters in `stats.json` reset when `serve` restarts, so read it before
+  restarting.
 - `stats.json`: `compactions` and `files_retired` are growing, `bytes_on_disk`
   is under the cap, and `write_errors` is 0.
 - Each closed hour holds exactly one file per (service, signal).
@@ -578,16 +587,24 @@ telemetry pointed at it, then check:
   Linux builds and the choice of oldest supported glibc. M0 de-risks the macOS
   path before any feature work.
 - **Binary size** is 121 MB unstripped and 90 MB with `-ldflags='-s -w'` (darwin/arm64, measured in M1; M0 was 79 MB and 62 MB); acceptable.
-- **The open hour holds up to `2×SealMinFiles+1` files per (service, signal)**,
-  because sealed files accumulate until the hour closes and only tails are
-  sealed. Queries over it open more files than a closed hour.
+- **The open hour holds at most `SealMinFiles` sealed files plus the tails
+  flushed since the last pass** per (service, signal). With defaults that is
+  ≤ 10 sealed plus at most `CompactInterval/FlushInterval` (150) tails just
+  before a pass. Queries over it open more files than a closed hour.
 - **A merge reads and rewrites a whole closed hour**, so I/O spikes at each hour
   boundary for busy services, and a merge that fails is retried every
   housekeeping pass.
 - **Skipped merges stay skipped:** partitions whose files have different schema
   metadata are never compacted, and are only logged.
-- **The disk cap ignores the open hour and `.tmp`**, so `bytes_on_disk` can
-  exceed `--max-disk` until the hour closes.
+- **The disk cap ignores `.tmp` and can't delete the open hour**, so
+  `bytes_on_disk` can exceed `--max-disk` until the hour closes. While the open
+  hour alone is over the cap, writes get `429` rather than growing the disk.
+- **A failed final flush loses rows:** if the flush in `Close` fails (for
+  example a failing disk), the rows still pending are lost, and an error is
+  returned and logged.
+- **Stats counters are per process:** `stats.json` counters reset when `serve`
+  restarts. Cumulative counters, or persisting them across restarts, are future
+  work.
 - **A query racing retirement** can fail if it outlives `--retire-grace`.
 - **Stringified attribute values** lose types (numeric comparisons need a
   `CAST`). Typed tools hide this; the `sql` tool docs must mention it.

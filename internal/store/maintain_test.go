@@ -12,6 +12,7 @@ import (
 	"github.com/apache/arrow-go/v18/arrow"
 	"github.com/apache/arrow-go/v18/arrow/array"
 	"github.com/apache/arrow-go/v18/arrow/memory"
+	"github.com/apache/arrow-go/v18/parquet/file"
 	"github.com/stretchr/testify/require"
 	"go.opentelemetry.io/collector/pdata/pcommon"
 	"go.opentelemetry.io/collector/pdata/plog"
@@ -297,6 +298,89 @@ func TestSealOpenHourTails(t *testing.T) {
 	require.Equal(t, m.Files[0].Rows, int64(len(seqs)))
 }
 
+func TestSealOpenHourBoundsSealedFiles(t *testing.T) {
+	dataDir := newDataDir(t)
+	clk := newClock(baseTime)
+	const sealMin = 3
+	s := openStore(t, Options{DataDir: dataDir, Now: clk.Now, SealMinFiles: sealMin, CompactInterval: time.Second})
+
+	var next int64
+	var want []int64
+	for pass := range 12 {
+		for range sealMin {
+			appendFlush(t, s, "svc", clk.Now(), next)
+			want = append(want, next)
+			next++
+		}
+		clk.Advance(2 * time.Second)
+		require.NoError(t, s.Maintain(t.Context()))
+
+		sealed := 0
+		for _, f := range readManifest(t, dataDir, "svc").Files {
+			if strings.HasPrefix(filepath.Base(f.Path), sealedPrefix) {
+				sealed++
+			}
+		}
+		require.LessOrEqual(t, sealed, sealMin, "pass %d", pass)
+	}
+
+	files := readManifest(t, dataDir, "svc").Files
+	require.Equal(t, int64(len(want)), totalRows(files))
+	require.Equal(t, want, listedSeqs(t, spansEngine(t, dataDir), dataDir, "svc", signalLogs))
+}
+
+func TestMergeRowGroupLen(t *testing.T) {
+	dataDir := newDataDir(t)
+	clk := newClock(baseTime)
+	s := openStore(t, Options{DataDir: dataDir, Now: clk.Now, SealMinFiles: 3})
+
+	const perFile = 50_000
+	for i := range 3 {
+		seqs := make([]int64, perFile)
+		for j := range seqs {
+			seqs[j] = int64(i*perFile + j)
+		}
+		appendFlush(t, s, "svc", clk.Now(), seqs...)
+	}
+	require.Greater(t, 3*perFile, mergeRowGroupLen)
+
+	clk.Advance(5 * time.Minute)
+	require.NoError(t, s.Maintain(t.Context()))
+
+	files := readManifest(t, dataDir, "svc").Files
+	require.Len(t, files, 1)
+	require.EqualValues(t, 3*perFile, files[0].Rows)
+	pf, err := file.OpenParquetFile(filepath.Join(dataDir, "services", ServiceDir("svc"), files[0].Path), false)
+	require.NoError(t, err)
+	defer func() { require.NoError(t, pf.Close()) }()
+	require.Greater(t, pf.NumRowGroups(), 1)
+	require.EqualValues(t, 3*perFile, pf.NumRows())
+}
+
+func TestDiskCapRefusesWritesFromOpenHour(t *testing.T) {
+	dataDir := newDataDir(t)
+	clk := newClock(baseTime)
+	s := openStore(t, Options{DataDir: dataDir, Now: clk.Now, MaxDiskBytes: 1})
+
+	appendFlush(t, s, "svc", clk.Now(), 1)
+	require.NoError(t, s.Maintain(t.Context()))
+	require.True(t, s.Stats().DiskCapExceeded)
+
+	_, _, err := s.AppendLogs(t.Context(), seqLogs("svc", clk.Now(), 2))
+	require.ErrorIs(t, err, ErrFull)
+	require.ErrorContains(t, err, "disk cap")
+	_, _, err = s.AppendTraces(t.Context(), seqSpans("svc", clk.Now(), 2))
+	require.ErrorIs(t, err, ErrFull)
+	require.EqualValues(t, 1, s.Stats().RecordsAccepted)
+
+	// Once the hour closes the cap retires it, which frees the space.
+	clk.Advance(time.Hour)
+	require.NoError(t, s.Maintain(t.Context()))
+	require.False(t, s.Stats().DiskCapExceeded)
+	_, _, err = s.AppendLogs(t.Context(), seqLogs("svc", clk.Now(), 3))
+	require.NoError(t, err)
+}
+
 func TestHourlyCompaction(t *testing.T) {
 	dataDir := newDataDir(t)
 	clk := newClock(baseTime)
@@ -501,8 +585,10 @@ func TestServiceRemoval(t *testing.T) {
 const (
 	soakHours = 48
 	// A step is 30 simulated minutes: real fsyncs cost ~5ms each on macOS, so per-minute steps would run for minutes.
-	soakStep       = 30 * time.Minute
-	soakCheckEvery = 6 * int(time.Hour/soakStep)
+	soakStep = 30 * time.Minute
+	// The first hours step at one compact interval with enough tails per pass to seal every time, which is what bounds the open hour's sealed files.
+	soakFineHours  = 2
+	soakCheckEvery = 6 * time.Hour
 	soakSealMin    = 2
 	soakRetention  = 12 * time.Hour
 	soakFlush      = time.Second
@@ -532,30 +618,31 @@ func TestSoakSimulated(t *testing.T) {
 	sent := map[string][]soakSeq{}
 	var next int64
 	began := time.Now()
-	for step := 1; step <= soakHours*int(time.Hour/soakStep); step++ {
+	nextCheck := start.Add(soakCheckEvery)
+	for clk.Now().Before(start.Add(soakHours * time.Hour)) {
 		now := clk.Now()
-		for _, name := range services {
-			for _, sig := range signals {
-				seqs := make([]int64, soakRecords)
-				for i := range seqs {
-					next++
-					seqs[i] = next
-					sent[name+"/"+sig] = append(sent[name+"/"+sig], soakSeq{seq: next, hour: now.Truncate(time.Hour)})
-				}
-				var err error
-				if sig == signalLogs {
-					_, _, err = s.AppendLogs(t.Context(), seqLogs(name, now, seqs...))
-				} else {
-					_, _, err = s.AppendTraces(t.Context(), seqSpans(name, now, seqs...))
-				}
-				require.NoError(t, err)
+		step, rounds := soakStep, 1
+		if now.Before(start.Add(soakFineHours * time.Hour)) {
+			step, rounds = soakCompact, soakSealMin
+		}
+		for round := range rounds {
+			soakAppend(t, s, services, sent, &next, now)
+			// The last round's tails are flushed by Maintain itself, just before the pass.
+			if round < rounds-1 {
+				require.NoError(t, s.Flush(t.Context()))
 			}
 		}
 		require.NoError(t, s.Maintain(t.Context()))
-		if step%soakCheckEvery == 0 {
-			checkSoak(t, s, e, dataDir, services, sent, now)
+		for _, name := range services {
+			for _, sig := range signals {
+				checkPartitions(t, listedFiles(t, dataDir, name, sig), now, rounds)
+			}
 		}
-		clk.Advance(soakStep)
+		if !now.Before(nextCheck) {
+			checkSoak(t, s, e, dataDir, services, sent, now, rounds)
+			nextCheck = nextCheck.Add(soakCheckEvery)
+		}
+		clk.Advance(step)
 	}
 
 	st := s.Stats()
@@ -572,7 +659,29 @@ func TestSoakSimulated(t *testing.T) {
 	require.Zero(t, st.PendingBatches)
 }
 
-func checkSoak(t *testing.T, s *Store, e *engine.Engine, dataDir string, services []string, sent map[string][]soakSeq, now time.Time) {
+func soakAppend(t *testing.T, s *Store, services []string, sent map[string][]soakSeq, next *int64, now time.Time) {
+	t.Helper()
+
+	for _, name := range services {
+		for _, sig := range signals {
+			seqs := make([]int64, soakRecords)
+			for i := range seqs {
+				*next++
+				seqs[i] = *next
+				sent[name+"/"+sig] = append(sent[name+"/"+sig], soakSeq{seq: *next, hour: now.Truncate(time.Hour)})
+			}
+			var err error
+			if sig == signalLogs {
+				_, _, err = s.AppendLogs(t.Context(), seqLogs(name, now, seqs...))
+			} else {
+				_, _, err = s.AppendTraces(t.Context(), seqSpans(name, now, seqs...))
+			}
+			require.NoError(t, err)
+		}
+	}
+}
+
+func checkSoak(t *testing.T, s *Store, e *engine.Engine, dataDir string, services []string, sent map[string][]soakSeq, now time.Time, flushedSincePass int) {
 	t.Helper()
 
 	var totalFiles int
@@ -594,7 +703,7 @@ func checkSoak(t *testing.T, s *Store, e *engine.Engine, dataDir string, service
 			onDisk[filepath.Join(svcDir, r.Path)] = true
 		}
 		for _, sig := range signals {
-			oldest := checkPartitions(t, listedFiles(t, dataDir, name, sig), now)
+			oldest := checkPartitions(t, listedFiles(t, dataDir, name, sig), now, flushedSincePass)
 			// Retention and the size cap drop whole hours, so every row at or after the oldest kept hour must be present exactly once.
 			var want []int64
 			for _, r := range sent[name+"/"+sig] {
@@ -622,7 +731,8 @@ func checkSoak(t *testing.T, s *Store, e *engine.Engine, dataDir string, service
 }
 
 // checkPartitions asserts the file-count shape of one service and signal and returns its oldest listed hour.
-func checkPartitions(t *testing.T, files []manifest.File, now time.Time) time.Time {
+// A pass merges the open hour into at most soakSealMin sealed files, so only the tails flushed since the last pass (plus fewer than soakSealMin it left) can be above that.
+func checkPartitions(t *testing.T, files []manifest.File, now time.Time, flushedSincePass int) time.Time {
 	t.Helper()
 
 	open := now.Truncate(time.Hour)
@@ -638,14 +748,17 @@ func checkPartitions(t *testing.T, files []manifest.File, now time.Time) time.Ti
 		require.True(t, h.Add(time.Hour).After(now.Add(-soakRetention)), "%s outlived retention at %s", dir, now)
 		switch {
 		case h.Equal(open):
-			tails := 0
+			tails, sealed := 0, 0
 			for _, n := range names {
-				if strings.HasPrefix(n, tailPrefix) {
+				switch {
+				case strings.HasPrefix(n, tailPrefix):
 					tails++
+				case strings.HasPrefix(n, sealedPrefix):
+					sealed++
 				}
 			}
-			require.LessOrEqual(t, tails, soakSealMin+1, "%s", dir)
-			require.LessOrEqual(t, len(names), 2*soakSealMin+1, "%s", dir)
+			require.LessOrEqual(t, sealed, soakSealMin, "%s: %v", dir, names)
+			require.LessOrEqual(t, tails, flushedSincePass+soakSealMin, "%s: %v", dir, names)
 		case !now.Before(h.Add(time.Hour + 2*soakFlush + soakStep)):
 			require.Len(t, names, 1, "%s: %v", dir, names)
 		}

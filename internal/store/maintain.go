@@ -250,7 +250,7 @@ func (r *retirer) retire(sv *service, drop func(f manifest.File) bool) (bytes in
 	return bytes
 }
 
-// retain retires files past the age limit, then the oldest closed partitions while the disk cap is exceeded.
+// retain retires files past the age limit, then the oldest closed partitions while the disk cap is exceeded; if only the open hour is left over it, writes are refused.
 func (s *Store) retain(now time.Time) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -270,10 +270,12 @@ func (s *Store) retain(now time.Time) error {
 	}
 
 	openHour := now.UTC().Truncate(time.Hour)
+	s.capExceeded = false
 	for total > s.opts.MaxDiskBytes {
 		sv, dir := s.oldestClosedPartition(openHour)
 		if sv == nil {
-			s.log.Warn("disk cap exceeded by the open hour alone", "bytes", total, "max_bytes", s.opts.MaxDiskBytes)
+			s.capExceeded = true
+			s.log.Warn("disk cap exceeded by the open hour alone, refusing writes", "bytes", total, "max_bytes", s.opts.MaxDiskBytes)
 
 			break
 		}

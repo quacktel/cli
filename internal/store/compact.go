@@ -23,7 +23,7 @@ import (
 
 const (
 	mergeBatchRows    = 64 << 10
-	mergeRowGroupLen  = 1_000_000
+	mergeRowGroupLen  = 128 << 10
 	tailPrefix        = "tail-"
 	sealedPrefix      = "sealed-"
 	hourPrefix        = "hour-"
@@ -40,7 +40,7 @@ type mergePlan struct {
 	sources []manifest.File
 }
 
-// compact merges tails in the open hour and whole partitions once their hour is closed.
+// compact seals open-hour partitions and merges whole partitions once their hour is closed.
 func (s *Store) compact(ctx context.Context) error {
 	var errs []error
 	for _, p := range s.planMerges(s.opts.Now()) {
@@ -87,7 +87,7 @@ func (s *Store) planMerges(now time.Time) []mergePlan {
 	return plans
 }
 
-// pickSources chooses what to merge in one partition: tails once enough pile up in the open hour, everything once the hour is closed.
+// pickSources chooses one merge per partition: in the open hour, everything once sealed files pile up, else the tails; everything once the hour is closed.
 func (s *Store) pickSources(dir string, files []manifest.File, now time.Time) ([]manifest.File, string) {
 	hour, ok := partitionHour(dir + "/x")
 	if !ok {
@@ -99,6 +99,10 @@ func (s *Store) pickSources(dir string, files []manifest.File, now time.Time) ([
 			if strings.HasPrefix(filepath.Base(f.Path), tailPrefix) {
 				tails = append(tails, f)
 			}
+		}
+		// Checked first: with steady traffic the tail condition is true every pass and would starve this merge.
+		if len(files)-len(tails) >= s.opts.SealMinFiles {
+			return files, sealedPrefix
 		}
 		if len(tails) >= s.opts.SealMinFiles {
 			return tails, sealedPrefix

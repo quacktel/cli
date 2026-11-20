@@ -79,6 +79,7 @@ type statsFile struct {
 	BytesOnDisk     int64     `json:"bytes_on_disk"`
 	PendingBatches  int64     `json:"pending_batches"`
 	WriteErrors     int64     `json:"write_errors"`
+	DiskCapExceeded bool      `json:"disk_cap_exceeded"`
 	UpdatedAt       time.Time `json:"updated_at"`
 }
 
@@ -236,6 +237,7 @@ func buildStats(rs receiver.Stats, ss store.Stats, redacted int64) statsFile {
 		BytesOnDisk:     ss.BytesOnDisk,
 		PendingBatches:  ss.PendingBatches,
 		WriteErrors:     ss.WriteErrors,
+		DiskCapExceeded: ss.DiskCapExceeded,
 	}
 }
 

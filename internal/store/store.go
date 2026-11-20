@@ -52,6 +52,10 @@ var signals = []string{signalLogs, signalSpans}
 
 var ErrFull = errors.New("store buffer is full")
 
+func (s *Store) diskCapError() error {
+	return fmt.Errorf("open hour exceeds the %d byte disk cap: %w", s.opts.MaxDiskBytes, ErrFull)
+}
+
 type Options struct {
 	DataDir       string
 	MaxServices   int
@@ -81,6 +85,8 @@ type Stats struct {
 	BytesOnDisk     int64
 	PendingBatches  int64
 	WriteErrors     int64
+	// DiskCapExceeded is true while the open hour alone is over the disk cap and writes are refused.
+	DiskCapExceeded bool
 }
 
 // signalBuilder is what the store needs from a per-signal Arrow builder.
@@ -120,6 +126,8 @@ type Store struct {
 	active map[string]struct{}
 	stats  Stats
 	closed bool
+	// capExceeded is set by retain when only open-hour data is left over the disk cap.
+	capExceeded bool
 }
 
 var slugReplacer = func(r rune) rune {
@@ -404,6 +412,9 @@ func (s *Store) AppendTraces(_ context.Context, td ptrace.Traces) (int64, string
 	if s.closed {
 		return 0, "", errors.New("store is closed")
 	}
+	if s.capExceeded {
+		return 0, "", s.diskCapError()
+	}
 	if s.buffered()+int64((&ptrace.ProtoMarshaler{}).TracesSize(td)) > s.opts.BufferBytes {
 		return 0, "", fmt.Errorf("batch does not fit in %d buffered bytes: %w", s.opts.BufferBytes, ErrFull)
 	}
@@ -453,6 +464,9 @@ func (s *Store) AppendLogs(_ context.Context, ld plog.Logs) (int64, string, erro
 
 	if s.closed {
 		return 0, "", errors.New("store is closed")
+	}
+	if s.capExceeded {
+		return 0, "", s.diskCapError()
 	}
 	// The wire size over-estimates slightly, which keeps the check all-or-nothing without a rollback path in the builders.
 	if s.buffered()+int64((&plog.ProtoMarshaler{}).LogsSize(ld)) > s.opts.BufferBytes {
@@ -560,6 +574,7 @@ func (s *Store) Stats() Stats {
 	defer s.mu.Unlock()
 
 	st := s.stats
+	st.DiskCapExceeded = s.capExceeded
 	st.Services = len(s.active)
 	for _, sv := range s.services {
 		for _, f := range sv.manifest.Files {

@@ -621,7 +621,7 @@ func TestServeCompaction(t *testing.T) {
 		require.Eventually(t, func() bool { return countParquet(t, svcDir) != before }, 5*time.Second, 10*time.Millisecond)
 	}
 
-	// Sealed files accumulate in the open hour, so the bound is 2*SealMinFiles+1, not 2.
+	// A pass leaves at most SealMinFiles sealed files plus fewer than SealMinFiles tails, and a few more tails can land before the next pass.
 	logsDir := filepath.Join(svcDir, "logs")
 	require.Eventually(t, func() bool {
 		n := countParquet(t, logsDir)
