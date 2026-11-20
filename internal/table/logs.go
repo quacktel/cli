@@ -11,18 +11,11 @@ import (
 )
 
 const (
-	SchemaVersionKey = "quacktel.schema_version"
-	SchemaVersion    = "1"
-
-	unknownService = "unknown_service"
-	fixedRowBytes  = 8 + 8 + 4 // time, observed_time, severity_number
+	fixedRowBytes = 8 + 8 + 4 // time, observed_time, severity_number
 )
 
-// No TimeZone, so DuckDB reads TIMESTAMP_NS (values are UTC by convention); a tz-aware column becomes TIMESTAMPTZ_NS, which duckdb-go cannot scan.
-var timeType = &arrow.TimestampType{Unit: arrow.Nanosecond}
-
 func LogsSchema() *arrow.Schema {
-	meta := arrow.NewMetadata([]string{SchemaVersionKey}, []string{SchemaVersion})
+	meta := arrow.NewMetadata([]string{SchemaVersionKey, SignalKey}, []string{SchemaVersion, "logs"})
 	str := arrow.BinaryTypes.String
 	attrs := arrow.MapOf(str, str)
 
@@ -62,23 +55,11 @@ const (
 	colAttrs
 )
 
-type LogsBuilder struct {
-	rb    *array.RecordBuilder
-	n     int
-	bytes int64
-	min   time.Time
-	max   time.Time
-}
+type LogsBuilder struct{ base }
 
 func NewLogsBuilder(mem memory.Allocator) *LogsBuilder {
-	return &LogsBuilder{rb: array.NewRecordBuilder(mem, LogsSchema())}
+	return &LogsBuilder{base{rb: array.NewRecordBuilder(mem, LogsSchema())}}
 }
-
-func (b *LogsBuilder) Len() int { return b.n }
-
-func (b *LogsBuilder) EstimatedBytes() int64 { return b.bytes }
-
-func (b *LogsBuilder) MinMaxTime() (time.Time, time.Time) { return b.min, b.max }
 
 func (b *LogsBuilder) Append(res pcommon.Resource, scope pcommon.InstrumentationScope, rec plog.LogRecord, receivedAt time.Time) {
 	ts := rec.Timestamp()
@@ -89,12 +70,7 @@ func (b *LogsBuilder) Append(res pcommon.Resource, scope pcommon.Instrumentation
 		ts = pcommon.NewTimestampFromTime(receivedAt)
 	}
 	t := ts.AsTime()
-	if b.n == 0 || t.Before(b.min) {
-		b.min = t
-	}
-	if b.n == 0 || t.After(b.max) {
-		b.max = t
-	}
+	b.track(t)
 
 	f := b.rb.Fields()
 	f[colTime].(*array.TimestampBuilder).Append(arrow.Timestamp(t.UnixNano()))
@@ -136,59 +112,4 @@ func (b *LogsBuilder) Append(res pcommon.Resource, scope pcommon.Instrumentation
 	b.attrs(f[colResourceAttrs], res.Attributes())
 	b.attrs(f[colAttrs], rec.Attributes())
 	b.n++
-}
-
-// NewRecord resets the builder so it can be reused for the next flush.
-func (b *LogsBuilder) NewRecord() arrow.RecordBatch {
-	b.n = 0
-	b.bytes = 0
-	b.min, b.max = time.Time{}, time.Time{}
-
-	return b.rb.NewRecordBatch()
-}
-
-func (b *LogsBuilder) Release() { b.rb.Release() }
-
-// ServiceName returns the resource service.name, or unknown_service when missing or empty.
-func ServiceName(res pcommon.Resource) string {
-	if v, ok := res.Attributes().Get("service.name"); ok {
-		if s := v.AsString(); s != "" {
-			return s
-		}
-	}
-
-	return unknownService
-}
-
-func hexID(empty bool, s string) string {
-	if empty {
-		return ""
-	}
-
-	return s
-}
-
-func (b *LogsBuilder) str(fb array.Builder, s string) {
-	if s == "" {
-		fb.AppendNull()
-
-		return
-	}
-	fb.(*array.StringBuilder).Append(s)
-	b.bytes += int64(len(s))
-}
-
-func (b *LogsBuilder) attrs(fb array.Builder, m pcommon.Map) {
-	mb := fb.(*array.MapBuilder)
-	mb.Append(true)
-	kb := mb.KeyBuilder().(*array.StringBuilder)
-	ib := mb.ItemBuilder().(*array.StringBuilder)
-	m.Range(func(k string, v pcommon.Value) bool {
-		val := v.AsString()
-		kb.Append(k)
-		ib.Append(val)
-		b.bytes += int64(len(k) + len(val))
-
-		return true
-	})
 }

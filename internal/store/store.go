@@ -25,6 +25,7 @@ import (
 	"github.com/apache/arrow-go/v18/parquet/pqarrow"
 	"github.com/oklog/ulid/v2"
 	"go.opentelemetry.io/collector/pdata/plog"
+	"go.opentelemetry.io/collector/pdata/ptrace"
 
 	"github.com/quacktel/cli/internal/paths"
 	"github.com/quacktel/cli/internal/table"
@@ -39,7 +40,13 @@ const (
 	manifestName    = "manifest.json"
 	manifestVersion = 1
 	limitMsg        = "service limit reached"
+
+	signalLogs  = "logs"
+	signalSpans = "spans"
 )
+
+// signals lists the per-signal directories under a service dir.
+var signals = []string{signalLogs, signalSpans}
 
 var ErrFull = errors.New("store buffer is full")
 
@@ -55,6 +62,8 @@ type Options struct {
 type Stats struct {
 	RecordsAccepted int64
 	RecordsRejected int64
+	SpansAccepted   int64
+	SpansRejected   int64
 	Flushes         int64
 	FilesWritten    int64
 	BytesWritten    int64
@@ -77,9 +86,18 @@ type manifest struct {
 	Files         []manifestFile `json:"files"`
 }
 
+// signalBuilder is what the store needs from a per-signal Arrow builder.
+type signalBuilder interface {
+	Len() int
+	EstimatedBytes() int64
+	MinMaxTime() (time.Time, time.Time)
+	NewRecord() arrow.RecordBatch
+	Release()
+}
+
 type service struct {
 	dir      string
-	builder  *table.LogsBuilder
+	builders map[string]signalBuilder
 	manifest manifest
 }
 
@@ -213,7 +231,30 @@ func (s *Store) load(dir string) error {
 		listed[f.Path] = true
 	}
 	changed := false
-	err = filepath.WalkDir(filepath.Join(dir, "logs"), func(path string, d fs.DirEntry, err error) error {
+	for _, signal := range signals {
+		found, err := reconcile(dir, signal, listed)
+		if err != nil {
+			return fmt.Errorf("failed to reconcile %s: %w", dir, err)
+		}
+		m.Files = append(m.Files, found...)
+		changed = changed || len(found) > 0
+	}
+
+	sv := &service{dir: dir, builders: map[string]signalBuilder{}, manifest: m}
+	if changed {
+		if err := s.publish(sv); err != nil {
+			return err
+		}
+	}
+	s.services[m.ServiceName] = sv
+
+	return nil
+}
+
+// reconcile describes parquet files under dir/signal that the manifest does not list.
+func reconcile(dir, signal string, listed map[string]bool) ([]manifestFile, error) {
+	var found []manifestFile
+	err := filepath.WalkDir(filepath.Join(dir, signal), func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
 			if errors.Is(err, fs.ErrNotExist) {
 				return nil
@@ -231,31 +272,19 @@ func (s *Store) load(dir string) error {
 		if listed[rel] {
 			return nil
 		}
-		mf, err := describe(path, rel)
+		mf, err := describe(path, rel, signal)
 		if err != nil {
 			return err
 		}
-		m.Files = append(m.Files, mf)
-		changed = true
+		found = append(found, mf)
 
 		return nil
 	})
-	if err != nil {
-		return fmt.Errorf("failed to reconcile %s: %w", dir, err)
-	}
 
-	sv := &service{dir: dir, manifest: m}
-	if changed {
-		if err := s.publish(sv); err != nil {
-			return err
-		}
-	}
-	s.services[m.ServiceName] = sv
-
-	return nil
+	return found, err
 }
 
-func describe(path, rel string) (manifestFile, error) {
+func describe(path, rel, signal string) (manifestFile, error) {
 	info, err := os.Stat(path)
 	if err != nil {
 		return manifestFile{}, fmt.Errorf("failed to stat %s: %w", path, err)
@@ -269,10 +298,91 @@ func describe(path, rel string) (manifestFile, error) {
 		return manifestFile{}, fmt.Errorf("failed to close parquet %s: %w", path, err)
 	}
 
-	return manifestFile{Path: rel, Signal: "logs", Rows: rows, Bytes: info.Size()}, nil
+	return manifestFile{Path: rel, Signal: signal, Rows: rows, Bytes: info.Size()}, nil
 }
 
 func (s *Store) tmpDir() string { return filepath.Join(s.opts.DataDir, ".tmp") }
+
+// buffered sums every signal's buffered bytes, so the cap covers the whole store.
+func (s *Store) buffered() int64 {
+	var n int64
+	for _, sv := range s.services {
+		for _, b := range sv.builders {
+			n += b.EstimatedBytes()
+		}
+	}
+
+	return n
+}
+
+// admit marks name active, or reports false when the service cap leaves no room for it.
+func (s *Store) admit(name string) (*service, bool) {
+	if _, ok := s.active[name]; !ok && len(s.active) >= s.opts.MaxServices {
+		return nil, false
+	}
+	s.active[name] = struct{}{}
+	sv, ok := s.services[name]
+	if !ok {
+		sv = &service{
+			dir:      filepath.Join(s.opts.DataDir, "services", ServiceDir(name)),
+			builders: map[string]signalBuilder{},
+			manifest: manifest{SchemaVersion: manifestVersion, ServiceName: name},
+		}
+		s.services[name] = sv
+	}
+
+	return sv, true
+}
+
+func (s *Store) AppendTraces(_ context.Context, td ptrace.Traces) (int64, string, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if s.closed {
+		return 0, "", errors.New("store is closed")
+	}
+	if s.buffered()+int64((&ptrace.ProtoMarshaler{}).TracesSize(td)) > s.opts.BufferBytes {
+		return 0, "", fmt.Errorf("batch does not fit in %d buffered bytes: %w", s.opts.BufferBytes, ErrFull)
+	}
+
+	now := s.opts.Now()
+	var rejected, accepted int64
+	rss := td.ResourceSpans()
+	for i := range rss.Len() {
+		rs := rss.At(i)
+		sv, ok := s.admit(table.ServiceName(rs.Resource()))
+		if !ok {
+			sss := rs.ScopeSpans()
+			for j := range sss.Len() {
+				rejected += int64(sss.At(j).Spans().Len())
+			}
+
+			continue
+		}
+		if sv.builders[signalSpans] == nil {
+			sv.builders[signalSpans] = table.NewSpansBuilder(s.mem)
+		}
+		b := sv.builders[signalSpans].(*table.SpansBuilder)
+		sss := rs.ScopeSpans()
+		for j := range sss.Len() {
+			ss := sss.At(j)
+			spans := ss.Spans()
+			for k := range spans.Len() {
+				b.Append(rs.Resource(), ss.Scope(), spans.At(k), now)
+				accepted++
+			}
+		}
+	}
+	s.stats.SpansAccepted += accepted
+	s.stats.SpansRejected += rejected
+
+	msg := ""
+	if rejected > 0 {
+		msg = limitMsg
+	}
+
+	return rejected, msg, nil
+}
 
 func (s *Store) AppendLogs(_ context.Context, ld plog.Logs) (int64, string, error) {
 	s.mu.Lock()
@@ -281,14 +391,8 @@ func (s *Store) AppendLogs(_ context.Context, ld plog.Logs) (int64, string, erro
 	if s.closed {
 		return 0, "", errors.New("store is closed")
 	}
-	var buffered int64
-	for _, sv := range s.services {
-		if sv.builder != nil {
-			buffered += sv.builder.EstimatedBytes()
-		}
-	}
 	// The wire size over-estimates slightly, which keeps the check all-or-nothing without a rollback path in the builders.
-	if buffered+int64((&plog.ProtoMarshaler{}).LogsSize(ld)) > s.opts.BufferBytes {
+	if s.buffered()+int64((&plog.ProtoMarshaler{}).LogsSize(ld)) > s.opts.BufferBytes {
 		return 0, "", fmt.Errorf("batch does not fit in %d buffered bytes: %w", s.opts.BufferBytes, ErrFull)
 	}
 
@@ -297,9 +401,8 @@ func (s *Store) AppendLogs(_ context.Context, ld plog.Logs) (int64, string, erro
 	rls := ld.ResourceLogs()
 	for i := range rls.Len() {
 		rl := rls.At(i)
-		name := table.ServiceName(rl.Resource())
-		_, isActive := s.active[name]
-		if !isActive && len(s.active) >= s.opts.MaxServices {
+		sv, ok := s.admit(table.ServiceName(rl.Resource()))
+		if !ok {
 			sls := rl.ScopeLogs()
 			for j := range sls.Len() {
 				rejected += int64(sls.At(j).LogRecords().Len())
@@ -307,24 +410,16 @@ func (s *Store) AppendLogs(_ context.Context, ld plog.Logs) (int64, string, erro
 
 			continue
 		}
-		s.active[name] = struct{}{}
-		sv, ok := s.services[name]
-		if !ok {
-			sv = &service{
-				dir:      filepath.Join(s.opts.DataDir, "services", ServiceDir(name)),
-				manifest: manifest{SchemaVersion: manifestVersion, ServiceName: name},
-			}
-			s.services[name] = sv
+		if sv.builders[signalLogs] == nil {
+			sv.builders[signalLogs] = table.NewLogsBuilder(s.mem)
 		}
-		if sv.builder == nil {
-			sv.builder = table.NewLogsBuilder(s.mem)
-		}
+		b := sv.builders[signalLogs].(*table.LogsBuilder)
 		sls := rl.ScopeLogs()
 		for j := range sls.Len() {
 			sl := sls.At(j)
 			recs := sl.LogRecords()
 			for k := range recs.Len() {
-				sv.builder.Append(rl.Resource(), sl.Scope(), recs.At(k), now)
+				b.Append(rl.Resource(), sl.Scope(), recs.At(k), now)
 				accepted++
 			}
 		}
@@ -365,23 +460,26 @@ func (s *Store) Flush(ctx context.Context) error {
 func (s *Store) flush(ctx context.Context) error {
 	var errs []error
 	for _, sv := range s.services {
-		if sv.builder == nil || sv.builder.Len() == 0 {
-			continue
-		}
-		if err := ctx.Err(); err != nil {
-			return errors.Join(append(errs, err)...)
-		}
-		if err := s.flushService(sv); err != nil {
-			errs = append(errs, fmt.Errorf("failed to flush service %q: %w", sv.manifest.ServiceName, err))
+		for _, signal := range signals {
+			b := sv.builders[signal]
+			if b == nil || b.Len() == 0 {
+				continue
+			}
+			if err := ctx.Err(); err != nil {
+				return errors.Join(append(errs, err)...)
+			}
+			if err := s.flushSignal(sv, signal, b); err != nil {
+				errs = append(errs, fmt.Errorf("failed to flush %s for service %q: %w", signal, sv.manifest.ServiceName, err))
+			}
 		}
 	}
 
 	return errors.Join(errs...)
 }
 
-func (s *Store) flushService(sv *service) (err error) {
-	minT, maxT := sv.builder.MinMaxTime()
-	rec := sv.builder.NewRecord()
+func (s *Store) flushSignal(sv *service, signal string, b signalBuilder) (err error) {
+	minT, maxT := b.MinMaxTime()
+	rec := b.NewRecord()
 	defer rec.Release()
 
 	tmpPath := filepath.Join(s.tmpDir(), ulid.Make().String()+".parquet")
@@ -390,7 +488,7 @@ func (s *Store) flushService(sv *service) (err error) {
 		return errors.Join(err, os.Remove(tmpPath))
 	}
 
-	part := filepath.Join(sv.dir, "logs", s.opts.Now().UTC().Format("date=2006-01-02/hour=15"))
+	part := filepath.Join(sv.dir, signal, s.opts.Now().UTC().Format("date=2006-01-02/hour=15"))
 	if err := os.MkdirAll(part, 0o700); err != nil {
 		return errors.Join(fmt.Errorf("failed to create partition dir: %w", err), os.Remove(tmpPath))
 	}
@@ -408,7 +506,7 @@ func (s *Store) flushService(sv *service) (err error) {
 	}
 	prev := sv.manifest
 	sv.manifest.Files = append(append([]manifestFile(nil), prev.Files...), manifestFile{
-		Path: rel, Signal: "logs", Rows: rec.NumRows(), Bytes: size, MinTime: minT.UTC(), MaxTime: maxT.UTC(),
+		Path: rel, Signal: signal, Rows: rec.NumRows(), Bytes: size, MinTime: minT.UTC(), MaxTime: maxT.UTC(),
 	})
 	if err := s.publish(sv); err != nil {
 		sv.manifest = prev
@@ -535,8 +633,8 @@ func (s *Store) Close() error {
 	s.closed = true
 	err := s.flush(context.Background())
 	for _, sv := range s.services {
-		if sv.builder != nil {
-			sv.builder.Release()
+		for _, b := range sv.builders {
+			b.Release()
 		}
 	}
 
