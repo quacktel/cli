@@ -32,6 +32,7 @@ type cli struct {
 	Globals
 
 	Version versionCmd `cmd:"" help:"Print version information."`
+	Query   queryCmd   `cmd:"" help:"Run a read-only SQL query over stored telemetry."`
 }
 
 type versionCmd struct{}

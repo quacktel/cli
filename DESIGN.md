@@ -48,7 +48,7 @@ quacktel version
 | Signals | Logs and traces | Highest value for debugging; metrics deferred. |
 | Platforms | M0–M6: macOS arm64 only. M7: add Linux amd64 and arm64. macOS amd64 is out of scope | Keeps the first phases tight: one runner and one service manager. Platform-specific code (paths, service) sits behind a small interface so Linux can be added without touching the rest. |
 | Transport | OTLP/HTTP only: protobuf and JSON, gzip accepted | One endpoint to harden. Users set `OTEL_EXPORTER_OTLP_PROTOCOL=http/protobuf`. |
-| Engine | DuckDB via `duckdb-go`, statically linked, used only on the read path | Full SQL with no runtime extensions. |
+| Engine | DuckDB via `duckdb-go` v2.20000.0 (DuckDB 2.0.0 LTS), statically linked, used only on the read path | Full SQL with no runtime extensions. |
 | Writer | arrow-go `pqarrow` | Reuses the parquet-arrow-search pattern and keeps the daemon free of DuckDB. |
 | Write path | Tail → seal → compact, with a manifest | ≤ ~1–5s staleness without DuckDB lock contention. |
 | Attributes | Promoted columns plus `MAP(VARCHAR, VARCHAR)` | Fast filters on hot keys; stable schema. |
@@ -241,17 +241,39 @@ can't read other services' files with `read_parquet` either. In a scoped session
 `list_services` returns only that service, and the `service` argument is
 ignored. Unscoped sessions read every service's manifest and union the files.
 
-> **Verify in M0:** that `allowed_directories` together with
-> `enable_external_access = false` permits `read_parquet` on the data dir and
-> blocks everything else, for the pinned DuckDB version; and that views can be
-> recreated after `lock_configuration`. If they can't, rebuild the connection
-> when the manifest changes.
+**Verified in M0 (DuckDB 2.0.0, duckdb-go v2.20000.0):**
+
+- The settings are database-wide. `Open` applies them once on one connection
+  (via `duckdb.NewConnector` and `sql.OpenDB`), ending with
+  `lock_configuration`, and tests confirm every pooled connection sees them
+  and rejects `SET`. No per-connection init or `SetMaxOpenConns(1)` is needed.
+- `allowed_directories` with `enable_external_access = false` permits
+  `read_parquet` inside the data dir and denies other paths, including a
+  symlink inside the data dir that points outside it (`read_text` and
+  `read_csv` fail with a permission error).
+- The guard uses `(*duckdb.Stmt).StatementType()` and requires
+  `duckdb.STATEMENT_TYPE_SELECT`. It prepares with `(*duckdb.Conn).Prepare`,
+  not `PrepareContext`: `PrepareContext` runs every statement except the last,
+  so `COPY ...; SELECT 1` would execute the `COPY`. `Prepare` rejects
+  multi-statement input without running anything.
+- `PRAGMA version` prepares as a `SELECT` (a table function), so it is allowed.
+  It is read-only. Setting pragmas such as `PRAGMA threads=8` are rejected.
+- `COPY ... TO` outside the allowed dir fails at prepare time with a
+  permission error, before the guard's type check. The guard is still what
+  stops a `COPY` into the allowed dir.
+- `duckdb_extensions()` fails on a hardened connection, because it scans the
+  extension directory. On an unhardened handle, `parquet`, `json`, `icu`,
+  `core_functions`, `autocomplete`, `tpch` and `tpcds` are loaded and
+  `STATICALLY_LINKED`; every other extension is `NOT_INSTALLED`. Nothing is
+  written to `~/.duckdb`.
+- `CREATE OR REPLACE VIEW` over `read_parquet` in the data dir works after
+  `lock_configuration`, so no connection rebuild is needed on manifest change.
 
 ### `sql` tool / `quacktel query`
 
 - Prepare the statement, then check its statement type is `SELECT` before
   executing. This rejects `COPY`, `ATTACH`, `INSTALL`, `SET`, `PRAGMA` and
-  multi-statement input. (Verify `duckdb-go` exposes the statement type.)
+  multi-statement input. The check uses `(*duckdb.Stmt).StatementType()`.
 - A per-query timeout (default 10s) and a row cap (default 1,000) apply.
   Wide text columns are truncated in MCP output.
 
@@ -410,7 +432,7 @@ Not reused: Substrait, Participle SQL, and the custom executor.
 - **CGO release cost:** one native build in M6. M7 adds two
   Linux builds and the choice of oldest supported glibc. M0 de-risks the macOS
   path before any feature work.
-- **Binary size** (est. 50–80 MB) is acceptable; to be measured in M0.
+- **Binary size** is 79 MB unstripped and 62 MB with `-ldflags='-s -w'` (darwin/arm64, measured in M0); acceptable.
 - **Stringified attribute values** lose types (numeric comparisons need a
   `CAST`). Typed tools hide this; the `sql` tool docs must mention it.
 - **`/v1/metrics` behaviour:** 200-and-drop vs 404 is still open.

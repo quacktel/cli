@@ -57,3 +57,25 @@ func TestHelp(t *testing.T) {
 	require.NoError(t, err)
 	require.Contains(t, stdout, "version")
 }
+
+func TestQueryJSON(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "d")
+	stdout, err := runBin(t, "query", "--data-dir", dir, "--format", "json", "SELECT 42 AS answer")
+	require.NoError(t, err)
+	require.Equal(t, "[{\"answer\":42}]\n", stdout)
+}
+
+func TestQueryRejectsCopy(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "d")
+	out := filepath.Join(dir, "x.csv")
+	_, err := runBin(t, "query", "--data-dir", dir, "--format", "json", "COPY (SELECT 1) TO '"+out+"'")
+	require.Error(t, err)
+	require.NoFileExists(t, out)
+}
+
+func TestQueryRejectsWideDataDir(t *testing.T) {
+	dir := t.TempDir()
+	require.NoError(t, os.Chmod(dir, 0o755))
+	_, err := runBin(t, "query", "--data-dir", dir, "--format", "json", "SELECT 1")
+	require.Error(t, err)
+}
