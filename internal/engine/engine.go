@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/duckdb/duckdb-go/v2"
@@ -22,7 +23,9 @@ const multiStmtMsg = "missing context for multi-statement query"
 var ErrNotSelect = errors.New("only a single SELECT statement is allowed")
 
 type Options struct {
-	AllowedDir  string
+	AllowedDir string
+	// DataDir, when set, must lie within AllowedDir; the logs and spans views are built from its manifests.
+	DataDir     string
 	MemoryLimit string
 	Threads     int
 	// Timeout bounds each query.
@@ -32,6 +35,11 @@ type Options struct {
 type Engine struct {
 	db      *sql.DB
 	timeout time.Duration
+	dataDir string
+
+	mu          sync.Mutex
+	fingerprint string
+	built       bool
 }
 
 type Result struct {
@@ -49,6 +57,10 @@ func Open(ctx context.Context, opts Options) (*Engine, error) {
 	}
 	if opts.Timeout == 0 {
 		opts.Timeout = defaultTimeout
+	}
+
+	if opts.DataDir != "" && !within(opts.AllowedDir, opts.DataDir) {
+		return nil, fmt.Errorf("data dir %s is outside allowed dir %s", opts.DataDir, opts.AllowedDir)
 	}
 
 	connector, err := duckdb.NewConnector("", nil)
@@ -81,7 +93,12 @@ func Open(ctx context.Context, opts Options) (*Engine, error) {
 		return nil, errors.Join(fmt.Errorf("failed to release connection: %w", err), db.Close())
 	}
 
-	return &Engine{db: db, timeout: opts.Timeout}, nil
+	e := &Engine{db: db, timeout: opts.Timeout, dataDir: opts.DataDir}
+	if err := e.refresh(ctx); err != nil {
+		return nil, errors.Join(err, db.Close())
+	}
+
+	return e, nil
 }
 
 func (e *Engine) Close() error {
@@ -91,6 +108,10 @@ func (e *Engine) Close() error {
 func (e *Engine) Query(ctx context.Context, query string, maxRows int) (Result, error) {
 	ctx, cancel := context.WithTimeout(ctx, e.timeout)
 	defer cancel()
+
+	if err := e.refresh(ctx); err != nil {
+		return Result{}, err
+	}
 
 	conn, err := e.db.Conn(ctx)
 	if err != nil {

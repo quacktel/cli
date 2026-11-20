@@ -78,6 +78,13 @@ func TestQueryJSON(t *testing.T) {
 	require.Equal(t, "[{\"answer\":42}]\n", stdout)
 }
 
+func TestQueryLogsViewEmptyDataDir(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "d")
+	stdout, err := runBin(t, "query", "--data-dir", dir, "--format", "json", "SELECT count(*) AS n FROM logs")
+	require.NoError(t, err)
+	require.Equal(t, "[{\"n\":0}]\n", stdout)
+}
+
 func TestQueryRejectsCopy(t *testing.T) {
 	dir := filepath.Join(t.TempDir(), "d")
 	out := filepath.Join(dir, "x.csv")

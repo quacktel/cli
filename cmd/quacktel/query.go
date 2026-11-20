@@ -35,7 +35,7 @@ func (c *queryCmd) Run(ctx context.Context, globals *Globals, w io.Writer) error
 		return err
 	}
 
-	e, err := engine.Open(ctx, engine.Options{AllowedDir: dir})
+	e, err := engine.Open(ctx, engine.Options{AllowedDir: dir, DataDir: dir})
 	if err != nil {
 		return fmt.Errorf("failed to open engine: %w", err)
 	}
