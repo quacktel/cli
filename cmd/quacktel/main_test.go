@@ -756,3 +756,15 @@ func TestMCPMissingDataDir(t *testing.T) {
 	require.Contains(t, stderr.String(), "run quacktel serve first")
 	require.NoDirExists(t, dir)
 }
+
+func TestQueryCannotReadHeadersFile(t *testing.T) {
+	dir := dataDir(t)
+	p := startServe(t, freeAddr(t), dir, "--auth")
+	require.NoError(t, p.cmd.Process.Signal(syscall.SIGTERM))
+	require.NoError(t, p.wait(t), p.stderr.String())
+	require.FileExists(t, filepath.Join(dir, "otlp-headers"))
+
+	stdout, err := runBin(t, "query", "--data-dir", dir, "SELECT content FROM read_text('"+filepath.Join(dir, "otlp-headers")+"')")
+	require.Error(t, err)
+	require.NotContains(t, stdout, "Bearer")
+}

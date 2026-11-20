@@ -27,7 +27,7 @@ var ErrNotSelect = errors.New("only a single SELECT statement is allowed")
 
 type Options struct {
 	AllowedDir string
-	// DataDir, when set, must lie within AllowedDir unless Service is set; the logs and spans views are built from its manifests.
+	// DataDir, when set, builds the logs and spans views from its manifests; unscoped, AllowedDir must lie within <DataDir>/services.
 	DataDir string
 	// Service scopes the views to one service; AllowedDir must then contain that service's directory.
 	Service     string
@@ -78,8 +78,8 @@ func Open(ctx context.Context, opts Options) (*Engine, error) {
 		if !within(opts.AllowedDir, scopedDir) {
 			return nil, fmt.Errorf("service dir %s is outside allowed dir %s", scopedDir, opts.AllowedDir)
 		}
-	case opts.DataDir != "" && !within(opts.AllowedDir, opts.DataDir):
-		return nil, fmt.Errorf("data dir %s is outside allowed dir %s", opts.DataDir, opts.AllowedDir)
+	case opts.DataDir != "" && !within(filepath.Join(opts.DataDir, "services"), opts.AllowedDir):
+		return nil, fmt.Errorf("allowed dir %s must be the services dir under %s or lie within it", opts.AllowedDir, opts.DataDir)
 	}
 
 	connector, err := duckdb.NewConnector("", nil)

@@ -20,7 +20,7 @@ func newRunner(t *testing.T, service string) *tools.Runner {
 	t.Helper()
 
 	dir := toolstest.Fixture(t)
-	opts := engine.Options{AllowedDir: dir, DataDir: dir}
+	opts := engine.Options{AllowedDir: filepath.Join(dir, "services"), DataDir: dir}
 	if service != "" {
 		opts.Service = service
 		opts.AllowedDir = filepath.Join(dir, "services", manifest.ServiceDir(service))

@@ -58,6 +58,7 @@ The `cmd/quacktel` tests build and run the real binary. `examples/otel-go-app` i
 - Parquet is written and merged outside the store lock.
 - The daemon never opens DuckDB. DuckDB is on the read path only, and it never installs or loads extensions at runtime.
 - Every reader connection applies the hardening settings in `DESIGN.md` and sets `lock_configuration = true` last. Scoped sessions restrict `allowed_directories` to that service's directory.
+- The engine's `allowed_directories` never includes the data dir root: unscoped is `<data>/services`, scoped is one service dir.
 - Raw SQL runs only after the prepared statement's type is confirmed as `SELECT`.
 - Typed tools bind every user value as a parameter. Column and attribute names are validated against the schema, never interpolated unchecked.
 - MCP tool output marks telemetry content as untrusted data, because any local process can write it.

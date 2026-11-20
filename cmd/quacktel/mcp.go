@@ -5,13 +5,11 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"path/filepath"
 	"time"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"github.com/quacktel/cli/internal/engine"
-	"github.com/quacktel/cli/internal/manifest"
 	"github.com/quacktel/cli/internal/mcpserver"
 	"github.com/quacktel/cli/internal/paths"
 	"github.com/quacktel/cli/internal/tools"
@@ -39,12 +37,7 @@ func (c *mcpCmd) Run(ctx context.Context, globals *Globals) error {
 		return err
 	}
 
-	opts := engine.Options{AllowedDir: dir, DataDir: dir}
-	if c.Service != "" {
-		opts.Service = c.Service
-		opts.AllowedDir = filepath.Join(dir, "services", manifest.ServiceDir(c.Service))
-	}
-	e, err := engine.Open(ctx, opts)
+	e, err := engine.Open(ctx, engineOptions(dir, c.Service))
 	if err != nil {
 		return fmt.Errorf("failed to open engine: %w", err)
 	}

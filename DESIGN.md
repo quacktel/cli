@@ -338,7 +338,11 @@ resolve the name to `<svc-dir>` and set `allowed_directories` to that directory
 only. The restriction is enforced by DuckDB, not by the tools, so the `sql` tool
 can't read other services' files with `read_parquet` either. In a scoped session,
 `list_services` returns only that service, and the `service` argument is
-ignored. Unscoped sessions read every service's manifest and union the files.
+ignored. Unscoped sessions read every service's manifest and union the files, and
+their `allowed_directories` is `<data dir>/services/` only. `otlp-headers`,
+`stats.json`, `.lock` and the manifests are outside DuckDB's reach (the engine
+reads manifests with Go, and `Open` rejects an unscoped `AllowedDir` outside
+`<data dir>/services`).
 
 **Verified in M0 (DuckDB 2.0.0, duckdb-go v2.20000.0):**
 
@@ -375,6 +379,9 @@ ignored. Unscoped sessions read every service's manifest and union the files.
   multi-statement input. The check uses `(*duckdb.Stmt).StatementType()`.
 - A per-query timeout (default 10s) applies. `query` caps rows at 1,000 by
   default; the `sql` tool caps them at 500 (see below).
+- Unscoped sessions can read only `<data dir>/services/`; `read_text` on
+  `otlp-headers` (the bearer token), `stats.json` or a manifest fails with a
+  permission error.
 - Scoped sessions (`--service`) narrow the connection two ways: `allowed_directories`
   shrinks to that service's directory, and the `logs`/`spans` views are built
   from that one service's manifest only. `read_parquet` on another service's
@@ -466,6 +473,12 @@ export OTEL_METRICS_EXPORTER=none
   ```json
   {"mcpServers": {"quacktel": {"command": "/abs/path/quacktel", "args": ["mcp"]}}}
   ```
+
+Run `quacktel serve` once before `quacktel mcp`, because `serve` creates the data
+dir and `mcp` exits if it is missing. `mcp` logs at Warn by default (`--debug`
+enables Debug). If the client reports the MCP server as disconnected, the reason
+is on the server's stderr, which Claude Code shows in its MCP logs or with
+`claude --debug`.
 
 Register the server with Claude Code with:
 

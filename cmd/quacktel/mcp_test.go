@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"net/http"
 	"os"
 	"os/exec"
@@ -90,7 +91,7 @@ func toolNames(t *testing.T, s *mcp.ClientSession) []string {
 
 func TestMCPEndToEnd(t *testing.T) {
 	dir := seedMCPData(t)
-	s, stderr := connectMCP(t, dir)
+	s, stderr := connectMCP(t, dir, "--debug")
 
 	require.ElementsMatch(t, []string{"list_services", "describe_schema", "search_logs", "find_spans", "get_trace", "sql"}, toolNames(t, s))
 
@@ -169,4 +170,20 @@ func TestMCPNoSQL(t *testing.T) {
 	names := toolNames(t, s)
 	require.Len(t, names, 5)
 	require.NotContains(t, names, "sql")
+}
+
+func TestMCPSQLCannotReadHeadersFile(t *testing.T) {
+	dir := dataDir(t)
+	p := startServe(t, freeAddr(t), dir, "--auth")
+	token := readToken(t, dir)
+	require.NoError(t, p.cmd.Process.Signal(syscall.SIGTERM))
+	require.NoError(t, p.wait(t), p.stderr.String())
+
+	s, _ := connectMCP(t, dir)
+	res, _ := callTool(t, s, "sql", map[string]any{"query": "SELECT content FROM read_text('" + filepath.Join(dir, "otlp-headers") + "')"})
+	require.True(t, res.IsError)
+	raw, err := json.Marshal(res)
+	require.NoError(t, err)
+	require.NotContains(t, string(raw), token)
+	require.NotContains(t, string(raw), "Bearer")
 }

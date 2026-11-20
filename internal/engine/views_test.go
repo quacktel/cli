@@ -76,7 +76,7 @@ func openViews(t *testing.T) (*Engine, string) {
 
 	t.Setenv("HOME", t.TempDir())
 	dir := t.TempDir()
-	e, err := Open(t.Context(), Options{AllowedDir: dir, DataDir: dir})
+	e, err := Open(t.Context(), Options{AllowedDir: filepath.Join(dir, "services"), DataDir: dir})
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, e.Close()) })
 
@@ -113,7 +113,7 @@ func TestViewsListedFilesOnly(t *testing.T) {
 	}))
 	writeSignalFile(t, filepath.Join(dir, "services", "b", "spans", "s2.parquet"), "spans", "s2")
 
-	e, err := Open(t.Context(), Options{AllowedDir: dir, DataDir: dir})
+	e, err := Open(t.Context(), Options{AllowedDir: filepath.Join(dir, "services"), DataDir: dir})
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, e.Close()) })
 
@@ -159,7 +159,7 @@ func TestViewsKeepHardening(t *testing.T) {
 	e, dir := openViews(t)
 	writeService(t, dir, "a", 1, []string{"a1"}, nil)
 
-	_, err := e.Query(t.Context(), "COPY (SELECT * FROM logs) TO '"+filepath.Join(dir, "out.csv")+"'", 10)
+	_, err := e.Query(t.Context(), "COPY (SELECT * FROM logs) TO '"+filepath.Join(dir, "services", "out.csv")+"'", 10)
 	require.ErrorIs(t, err, ErrNotSelect)
 
 	secret := filepath.Join(t.TempDir(), "secret.txt")
@@ -168,10 +168,32 @@ func TestViewsKeepHardening(t *testing.T) {
 	require.Error(t, err)
 }
 
-func TestOpenRejectsDataDirOutsideAllowedDir(t *testing.T) {
+func TestOpenRejectsAllowedDirOutsideServices(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
-	_, err := Open(t.Context(), Options{AllowedDir: t.TempDir(), DataDir: t.TempDir()})
-	require.Error(t, err)
+	dir := t.TempDir()
+	_, err := Open(t.Context(), Options{AllowedDir: t.TempDir(), DataDir: dir})
+	require.ErrorContains(t, err, "services dir")
+	_, err = Open(t.Context(), Options{AllowedDir: dir, DataDir: dir})
+	require.ErrorContains(t, err, "services dir")
+}
+
+func TestUnscopedCannotReadDataDirRoot(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	dir := t.TempDir()
+	require.NoError(t, os.Chmod(dir, 0o700))
+	writeStoreServices(t, dir, "alpha")
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "otlp-headers"), []byte("authorization=Bearer dummy\n"), 0o600))
+	e, err := Open(t.Context(), Options{AllowedDir: filepath.Join(dir, "services"), DataDir: dir})
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, e.Close()) })
+
+	for _, name := range []string{"otlp-headers", "stats.json"} {
+		_, err = e.Query(t.Context(), "SELECT content FROM read_text('"+filepath.Join(dir, name)+"')", 10)
+		require.Error(t, err, name)
+	}
+	res, err := e.Query(t.Context(), "SELECT count(*) FROM logs", 10)
+	require.NoError(t, err)
+	require.Equal(t, [][]any{{int64(1)}}, res.Rows)
 }
 
 // writeStoreServices writes one real log record per service through the store.

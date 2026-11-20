@@ -120,6 +120,10 @@ func run() error {
 	}
 
 	level := slog.LevelInfo
+	// The MCP SDK logs every session at Info, which floods client logs.
+	if kctx.Command() == "mcp" {
+		level = slog.LevelWarn
+	}
 	if args.Debug {
 		level = slog.LevelDebug
 	}
