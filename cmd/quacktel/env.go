@@ -72,12 +72,9 @@ func (c *envCmd) authHeader() (string, error) {
 }
 
 func (c *envCmd) printMCP(w io.Writer) error {
-	exe, err := os.Executable()
+	exe, err := executablePath()
 	if err != nil {
-		return fmt.Errorf("failed to find the quacktel binary: %w", err)
-	}
-	if exe, err = filepath.EvalSymlinks(exe); err != nil {
-		return fmt.Errorf("failed to resolve the quacktel binary: %w", err)
+		return err
 	}
 
 	args := []string{"mcp"}
@@ -96,4 +93,16 @@ func (c *envCmd) printMCP(w io.Writer) error {
 	enc.SetIndent("", "  ")
 
 	return enc.Encode(cfg)
+}
+
+func executablePath() (string, error) {
+	exe, err := os.Executable()
+	if err != nil {
+		return "", fmt.Errorf("failed to find the quacktel binary: %w", err)
+	}
+	if exe, err = filepath.EvalSymlinks(exe); err != nil {
+		return "", fmt.Errorf("failed to resolve the quacktel binary: %w", err)
+	}
+
+	return exe, nil
 }

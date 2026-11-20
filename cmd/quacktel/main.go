@@ -18,6 +18,7 @@ import (
 
 	"github.com/quacktel/cli/internal/logfile"
 	"github.com/quacktel/cli/internal/receiver"
+	"github.com/quacktel/cli/internal/service"
 )
 
 // Set by ldflags at release time.
@@ -41,6 +42,7 @@ type cli struct {
 	Serve   serveCmd   `cmd:"" help:"Run the OTLP receiver and write logs to Parquet."`
 	Query   queryCmd   `cmd:"" help:"Run a read-only SQL query over stored telemetry."`
 	Env     envCmd     `cmd:"" help:"Print shell exports or MCP config for pointing apps at quacktel."`
+	Service serviceCmd `cmd:"" help:"Manage the launchd agent that runs quacktel serve."`
 	MCP     mcpCmd     `cmd:"" name:"mcp" help:"Serve stored telemetry to agents over MCP on stdio."`
 }
 
@@ -114,6 +116,15 @@ func newLogger(path string, level slog.Level) (*slog.Logger, func() error, error
 	return slog.New(tint.NewTextHandler(w, &tint.Options{Level: level, NoColor: true})), w.Close, nil
 }
 
+func kongVars() kong.Vars {
+	return kong.Vars{
+		"listen":        receiver.DefaultAddr,
+		"max_body":      strconv.Itoa(receiver.DefaultMaxBody),
+		"max_inflight":  strconv.Itoa(receiver.DefaultMaxInFlight),
+		"service_label": service.DefaultLabel,
+	}
+}
+
 func run() (retErr error) {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
@@ -123,11 +134,7 @@ func run() (retErr error) {
 		kong.Name("quacktel"),
 		kong.Description("Local OTLP to Parquet store with MCP query. Results go to stdout; logs go to stderr."),
 		kong.Writers(os.Stdout, os.Stderr),
-		kong.Vars{
-			"listen":       receiver.DefaultAddr,
-			"max_body":     strconv.Itoa(receiver.DefaultMaxBody),
-			"max_inflight": strconv.Itoa(receiver.DefaultMaxInFlight),
-		},
+		kongVars(),
 	)
 	if err != nil {
 		return fmt.Errorf("failed to build CLI: %w", err)

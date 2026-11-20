@@ -105,12 +105,9 @@ func New(opts Options, sinks Sinks) (*Server, error) {
 	if opts.Logger == nil {
 		opts.Logger = slog.New(slog.DiscardHandler)
 	}
-	host, _, err := net.SplitHostPort(opts.Addr)
+	host, err := CheckAddr(opts.Addr, opts.UnsafeBind)
 	if err != nil {
-		return nil, fmt.Errorf("invalid receiver address %q: %w", opts.Addr, err)
-	}
-	if !opts.UnsafeBind && !isLoopback(host) {
-		return nil, fmt.Errorf("refusing non-loopback address %q without unsafe bind", opts.Addr)
+		return nil, err
 	}
 	ln, err := (&net.ListenConfig{}).Listen(context.Background(), "tcp", opts.Addr)
 	if err != nil {
@@ -143,6 +140,19 @@ func New(opts Options, sinks Sinks) (*Server, error) {
 		MaxHeaderBytes:    64 << 10,
 	}
 	return s, nil
+}
+
+// CheckAddr lets callers such as service install reject a bad bind before serve ever runs.
+func CheckAddr(addr string, unsafeBind bool) (host string, err error) {
+	host, _, err = net.SplitHostPort(addr)
+	if err != nil {
+		return "", fmt.Errorf("invalid receiver address %q: %w", addr, err)
+	}
+	if !unsafeBind && !isLoopback(host) {
+		return "", fmt.Errorf("refusing non-loopback address %q without unsafe bind", addr)
+	}
+
+	return host, nil
 }
 
 func isLoopback(host string) bool {
