@@ -259,7 +259,7 @@ func TestReconcile(t *testing.T) {
 	}
 }
 
-func TestReconcileSkipsRetired(t *testing.T) {
+func TestOpenDeletesRetired(t *testing.T) {
 	dataDir := newDataDir(t)
 	t.Setenv("HOME", t.TempDir())
 	s, err := Open(t.Context(), Options{DataDir: dataDir, Now: func() time.Time { return fixedNow }})
@@ -284,8 +284,9 @@ func TestReconcileSkipsRetired(t *testing.T) {
 
 	got := readManifest(t, dataDir, "svc")
 	require.Empty(t, got.Files)
-	require.Equal(t, m.Retired, got.Retired)
-	require.Equal(t, m.Generation, got.Generation)
+	require.Empty(t, got.Retired)
+	require.Empty(t, parquetFiles(t, dataDir))
+	require.Equal(t, m.Generation+1, got.Generation)
 }
 
 func TestLock(t *testing.T) {

@@ -22,7 +22,6 @@ import (
 	"github.com/apache/arrow-go/v18/parquet/compress"
 	"github.com/apache/arrow-go/v18/parquet/file"
 	"github.com/apache/arrow-go/v18/parquet/pqarrow"
-	"github.com/oklog/ulid/v2"
 	"go.opentelemetry.io/collector/pdata/plog"
 	"go.opentelemetry.io/collector/pdata/ptrace"
 
@@ -35,6 +34,11 @@ const (
 	defaultMaxServices   = 256
 	defaultBufferBytes   = 64 << 20
 	defaultFlushInterval = 2 * time.Second
+	defaultCompactEvery  = 5 * time.Minute
+	defaultSealMinFiles  = 10
+	defaultRetireGrace   = 60 * time.Second
+	defaultRetention     = 720 * time.Hour
+	defaultMaxDiskBytes  = 10 << 30
 
 	maxSlugLen = 64
 	limitMsg   = "service limit reached"
@@ -55,6 +59,12 @@ type Options struct {
 	FlushInterval time.Duration
 	Logger        *slog.Logger
 	Now           func() time.Time
+
+	CompactInterval time.Duration
+	SealMinFiles    int
+	RetireGrace     time.Duration
+	Retention       time.Duration
+	MaxDiskBytes    int64
 }
 
 type Stats struct {
@@ -66,6 +76,11 @@ type Stats struct {
 	FilesWritten    int64
 	BytesWritten    int64
 	Services        int
+	Compactions     int64
+	FilesRetired    int64
+	BytesOnDisk     int64
+	PendingBatches  int64
+	WriteErrors     int64
 }
 
 // signalBuilder is what the store needs from a per-signal Arrow builder.
@@ -81,12 +96,22 @@ type service struct {
 	dir      string
 	builders map[string]signalBuilder
 	manifest manifest.Manifest
+	// pending holds swapped-out batches awaiting a successful write, per signal.
+	pending map[string][]pendingBatch
+	// unpublished lists renamed files whose manifest publish failed.
+	unpublished []manifest.File
 }
 
 type Store struct {
 	opts Options
 	log  *slog.Logger
 	mem  memory.Allocator
+	// writeParquet is a seam so tests can block or fail writes.
+	writeParquet func(path string, rec arrow.RecordBatch) (int64, error)
+
+	// mm serialises maintenance passes and Close; lastHousekeeping is guarded by it.
+	mm               sync.Mutex
+	lastHousekeeping time.Time
 
 	mu       sync.Mutex
 	lock     *os.File
@@ -134,6 +159,21 @@ func Open(ctx context.Context, opts Options) (*Store, error) {
 	if opts.FlushInterval == 0 {
 		opts.FlushInterval = defaultFlushInterval
 	}
+	if opts.CompactInterval == 0 {
+		opts.CompactInterval = defaultCompactEvery
+	}
+	if opts.SealMinFiles == 0 {
+		opts.SealMinFiles = defaultSealMinFiles
+	}
+	if opts.RetireGrace == 0 {
+		opts.RetireGrace = defaultRetireGrace
+	}
+	if opts.Retention == 0 {
+		opts.Retention = defaultRetention
+	}
+	if opts.MaxDiskBytes == 0 {
+		opts.MaxDiskBytes = defaultMaxDiskBytes
+	}
 	if opts.Now == nil {
 		opts.Now = time.Now
 	}
@@ -152,7 +192,7 @@ func Open(ctx context.Context, opts Options) (*Store, error) {
 		return nil, errors.Join(fmt.Errorf("another quacktel serve is using data dir %s: %w", opts.DataDir, err), lock.Close())
 	}
 
-	s := &Store{opts: opts, log: opts.Logger, mem: memory.DefaultAllocator, lock: lock, services: map[string]*service{}, active: map[string]struct{}{}}
+	s := &Store{opts: opts, log: opts.Logger, mem: memory.DefaultAllocator, lock: lock, writeParquet: writeParquet, services: map[string]*service{}, active: map[string]struct{}{}}
 	if err := s.init(ctx); err != nil {
 		return nil, errors.Join(err, s.unlock())
 	}
@@ -208,11 +248,15 @@ func (s *Store) load(dir string) error {
 	for _, f := range m.Files {
 		listed[f.Path] = true
 	}
-	// A retired file is awaiting deletion and must not be listed again.
+	// No reader survives a restart, so retired files go immediately.
+	changed := len(m.Retired) > 0
 	for _, r := range m.Retired {
-		listed[r.Path] = true
+		if err := removeFile(dir, r.Path); err != nil {
+			return err
+		}
+		s.stats.FilesRetired++
 	}
-	changed := false
+	m.Retired = nil
 	for _, signal := range signals {
 		found, err := reconcile(dir, signal, listed)
 		if err != nil {
@@ -222,7 +266,7 @@ func (s *Store) load(dir string) error {
 		changed = changed || len(found) > 0
 	}
 
-	sv := &service{dir: dir, builders: map[string]signalBuilder{}, manifest: m}
+	sv := s.newService(dir, m)
 	if changed {
 		if err := s.publish(sv); err != nil {
 			return err
@@ -285,12 +329,37 @@ func describe(path, rel, signal string) (manifest.File, error) {
 
 func (s *Store) tmpDir() string { return filepath.Join(s.opts.DataDir, ".tmp") }
 
-// buffered sums every signal's buffered bytes, so the cap covers the whole store.
+func (s *Store) serviceDir(name string) string {
+	return filepath.Join(s.opts.DataDir, "services", ServiceDir(name))
+}
+
+func (s *Store) newService(dir string, m manifest.Manifest) *service {
+	return &service{dir: dir, builders: map[string]signalBuilder{}, manifest: m, pending: map[string][]pendingBatch{}}
+}
+
+// removeFile unlinks a manifest-relative path; a missing file counts as deleted.
+func removeFile(dir, rel string) error {
+	if !filepath.IsLocal(rel) {
+		return fmt.Errorf("manifest path %q escapes service dir %s", rel, dir)
+	}
+	if err := os.Remove(filepath.Join(dir, rel)); err != nil && !errors.Is(err, fs.ErrNotExist) {
+		return fmt.Errorf("failed to remove %s: %w", rel, err)
+	}
+
+	return nil
+}
+
+// buffered sums buffered and pending bytes across signals, so a failing disk ends in ErrFull rather than unbounded memory.
 func (s *Store) buffered() int64 {
 	var n int64
 	for _, sv := range s.services {
 		for _, b := range sv.builders {
 			n += b.EstimatedBytes()
+		}
+		for _, batches := range sv.pending {
+			for _, p := range batches {
+				n += p.bytes
+			}
 		}
 	}
 
@@ -305,11 +374,7 @@ func (s *Store) admit(name string) (*service, bool) {
 	s.active[name] = struct{}{}
 	sv, ok := s.services[name]
 	if !ok {
-		sv = &service{
-			dir:      filepath.Join(s.opts.DataDir, "services", ServiceDir(name)),
-			builders: map[string]signalBuilder{},
-			manifest: manifest.Manifest{SchemaVersion: manifest.Version, ServiceName: name},
-		}
+		sv = s.newService(s.serviceDir(name), manifest.Manifest{SchemaVersion: manifest.Version, ServiceName: name})
 		s.services[name] = sv
 	}
 
@@ -417,92 +482,6 @@ func (s *Store) AppendLogs(_ context.Context, ld plog.Logs) (int64, string, erro
 	return rejected, msg, nil
 }
 
-func (s *Store) Run(ctx context.Context) error {
-	t := time.NewTicker(s.opts.FlushInterval)
-	defer t.Stop()
-	for {
-		select {
-		case <-ctx.Done():
-			return nil
-		case <-t.C:
-			if err := s.Flush(ctx); err != nil && ctx.Err() == nil {
-				s.log.ErrorContext(ctx, "flush failed", "error", err)
-			}
-		}
-	}
-}
-
-func (s *Store) Flush(ctx context.Context) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	return s.flush(ctx)
-}
-
-func (s *Store) flush(ctx context.Context) error {
-	var errs []error
-	for _, sv := range s.services {
-		for _, signal := range signals {
-			b := sv.builders[signal]
-			if b == nil || b.Len() == 0 {
-				continue
-			}
-			if err := ctx.Err(); err != nil {
-				return errors.Join(append(errs, err)...)
-			}
-			if err := s.flushSignal(sv, signal, b); err != nil {
-				errs = append(errs, fmt.Errorf("failed to flush %s for service %q: %w", signal, sv.manifest.ServiceName, err))
-			}
-		}
-	}
-
-	return errors.Join(errs...)
-}
-
-func (s *Store) flushSignal(sv *service, signal string, b signalBuilder) (err error) {
-	minT, maxT := b.MinMaxTime()
-	rec := b.NewRecord()
-	defer rec.Release()
-
-	tmpPath := filepath.Join(s.tmpDir(), ulid.Make().String()+".parquet")
-	size, err := writeParquet(tmpPath, rec)
-	if err != nil {
-		return errors.Join(err, os.Remove(tmpPath))
-	}
-
-	part := filepath.Join(sv.dir, signal, s.opts.Now().UTC().Format("date=2006-01-02/hour=15"))
-	if err := os.MkdirAll(part, 0o700); err != nil {
-		return errors.Join(fmt.Errorf("failed to create partition dir: %w", err), os.Remove(tmpPath))
-	}
-	final := filepath.Join(part, "tail-"+ulid.Make().String()+".parquet")
-	if err := os.Rename(tmpPath, final); err != nil {
-		return errors.Join(fmt.Errorf("failed to rename parquet into place: %w", err), os.Remove(tmpPath))
-	}
-	if err := manifest.SyncDir(part); err != nil {
-		return err
-	}
-
-	rel, err := filepath.Rel(sv.dir, final)
-	if err != nil {
-		return fmt.Errorf("failed to relativise %s: %w", final, err)
-	}
-	prev := sv.manifest
-	sv.manifest.Files = append(append([]manifest.File(nil), prev.Files...), manifest.File{
-		Path: rel, Signal: signal, Rows: rec.NumRows(), Bytes: size, MinTime: minT.UTC(), MaxTime: maxT.UTC(),
-	})
-	if err := s.publish(sv); err != nil {
-		sv.manifest = prev
-
-		return err
-	}
-
-	s.stats.Flushes++
-	s.stats.FilesWritten++
-	s.stats.BytesWritten += size
-
-	return nil
-}
-
 // nopCloser keeps pqarrow from closing the file, so the caller can sync it first.
 type nopCloser struct{ io.Writer }
 
@@ -556,24 +535,6 @@ func (s *Store) publish(sv *service) error {
 	return nil
 }
 
-func (s *Store) Close() error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	if s.closed {
-		return nil
-	}
-	s.closed = true
-	err := s.flush(context.Background())
-	for _, sv := range s.services {
-		for _, b := range sv.builders {
-			b.Release()
-		}
-	}
-
-	return errors.Join(err, s.unlock())
-}
-
 func (s *Store) unlock() error {
 	return errors.Join(syscall.Flock(int(s.lock.Fd()), syscall.LOCK_UN), s.lock.Close())
 }
@@ -584,6 +545,14 @@ func (s *Store) Stats() Stats {
 
 	st := s.stats
 	st.Services = len(s.active)
+	for _, sv := range s.services {
+		for _, f := range sv.manifest.Files {
+			st.BytesOnDisk += f.Bytes
+		}
+		for _, batches := range sv.pending {
+			st.PendingBatches += int64(len(batches))
+		}
+	}
 
 	return st
 }

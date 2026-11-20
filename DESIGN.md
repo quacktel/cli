@@ -106,7 +106,7 @@ data/
       logs/date=2026-11-20/hour=13/
         tail-<ulid>.parquet           # flushed every 1–5s, only when there is data
         sealed-<ulid>.parquet         # tails merged every ~5 min
-        hour.parquet                  # final merge once the hour is closed
+        hour-<ulid>.parquet           # final merge once the hour is closed
       spans/date=…/hour=…/…
   .tmp/                               # in-progress writes; never read
   .lock                               # flock held by the running serve
@@ -510,9 +510,13 @@ Not reused: Substrait, Participle SQL, and the custom executor.
   Linux builds and the choice of oldest supported glibc. M0 de-risks the macOS
   path before any feature work.
 - **Binary size** is 121 MB unstripped and 90 MB with `-ldflags='-s -w'` (darwin/arm64, measured in M1; M0 was 79 MB and 62 MB); acceptable.
-- **Flush blocks requests:** `Flush` holds the store lock while writing Parquet,
-  so requests wait during a flush. M3 should swap buffers and write outside the lock.
-- **A failed flush drops that batch's rows** (logged). M3 should retry.
+- **Flush swaps buffers and writes outside the store lock** (M3), so requests
+  don't wait on disk. A failed write keeps the batch pending and retries next
+  pass; pending bytes count toward the buffer cap, so a failing disk ends in 429.
+- **A crash between a compaction's rename and its publish** leaves the merged
+  file unlisted next to its still-listed sources, and startup reconcile would
+  list both (duplicate rows). Rare; a fix would stage merged files under a
+  non-`.parquet` name.
 - **Stringified attribute values** lose types (numeric comparisons need a
   `CAST`). Typed tools hide this; the `sql` tool docs must mention it.
 - **The span promoted-key set** was chosen in M2 from the OpenTelemetry HTTP and GenAI conventions, not from real samples. Revisit it against real agent traces; a change bumps the schema version.
