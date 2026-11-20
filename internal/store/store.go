@@ -4,7 +4,6 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -27,6 +26,7 @@ import (
 	"go.opentelemetry.io/collector/pdata/plog"
 	"go.opentelemetry.io/collector/pdata/ptrace"
 
+	"github.com/quacktel/cli/internal/manifest"
 	"github.com/quacktel/cli/internal/paths"
 	"github.com/quacktel/cli/internal/table"
 )
@@ -36,10 +36,8 @@ const (
 	defaultBufferBytes   = 64 << 20
 	defaultFlushInterval = 2 * time.Second
 
-	maxSlugLen      = 64
-	manifestName    = "manifest.json"
-	manifestVersion = 1
-	limitMsg        = "service limit reached"
+	maxSlugLen = 64
+	limitMsg   = "service limit reached"
 
 	signalLogs  = "logs"
 	signalSpans = "spans"
@@ -70,22 +68,6 @@ type Stats struct {
 	Services        int
 }
 
-type manifestFile struct {
-	Path    string    `json:"path"`
-	Signal  string    `json:"signal"`
-	Rows    int64     `json:"rows"`
-	Bytes   int64     `json:"bytes"`
-	MinTime time.Time `json:"min_time,omitzero"`
-	MaxTime time.Time `json:"max_time,omitzero"`
-}
-
-type manifest struct {
-	SchemaVersion int            `json:"schema_version"`
-	ServiceName   string         `json:"service_name"`
-	Generation    int64          `json:"generation"`
-	Files         []manifestFile `json:"files"`
-}
-
 // signalBuilder is what the store needs from a per-signal Arrow builder.
 type signalBuilder interface {
 	Len() int
@@ -98,7 +80,7 @@ type signalBuilder interface {
 type service struct {
 	dir      string
 	builders map[string]signalBuilder
-	manifest manifest
+	manifest manifest.Manifest
 }
 
 type Store struct {
@@ -211,24 +193,24 @@ func (s *Store) init(ctx context.Context) error {
 }
 
 func (s *Store) load(dir string) error {
-	data, err := os.ReadFile(filepath.Join(dir, manifestName)) //nolint:gosec // G304: path is derived from the data dir, never from request input
+	m, err := manifest.Read(filepath.Join(dir, manifest.Name))
 	if errors.Is(err, fs.ErrNotExist) {
 		return nil
 	}
 	if err != nil {
-		return fmt.Errorf("failed to read manifest in %s: %w", dir, err)
-	}
-	var m manifest
-	if err := json.Unmarshal(data, &m); err != nil {
-		return fmt.Errorf("failed to parse manifest in %s: %w", dir, err)
+		return err
 	}
 	if filepath.Join(filepath.Dir(dir), ServiceDir(m.ServiceName)) != dir {
 		return fmt.Errorf("manifest in %s names service %q, which maps to a different directory", dir, m.ServiceName)
 	}
 
-	listed := make(map[string]bool, len(m.Files))
+	listed := make(map[string]bool, len(m.Files)+len(m.Retired))
 	for _, f := range m.Files {
 		listed[f.Path] = true
+	}
+	// A retired file is awaiting deletion and must not be listed again.
+	for _, r := range m.Retired {
+		listed[r.Path] = true
 	}
 	changed := false
 	for _, signal := range signals {
@@ -252,8 +234,8 @@ func (s *Store) load(dir string) error {
 }
 
 // reconcile describes parquet files under dir/signal that the manifest does not list.
-func reconcile(dir, signal string, listed map[string]bool) ([]manifestFile, error) {
-	var found []manifestFile
+func reconcile(dir, signal string, listed map[string]bool) ([]manifest.File, error) {
+	var found []manifest.File
 	err := filepath.WalkDir(filepath.Join(dir, signal), func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
 			if errors.Is(err, fs.ErrNotExist) {
@@ -284,21 +266,21 @@ func reconcile(dir, signal string, listed map[string]bool) ([]manifestFile, erro
 	return found, err
 }
 
-func describe(path, rel, signal string) (manifestFile, error) {
+func describe(path, rel, signal string) (manifest.File, error) {
 	info, err := os.Stat(path)
 	if err != nil {
-		return manifestFile{}, fmt.Errorf("failed to stat %s: %w", path, err)
+		return manifest.File{}, fmt.Errorf("failed to stat %s: %w", path, err)
 	}
 	r, err := file.OpenParquetFile(path, false)
 	if err != nil {
-		return manifestFile{}, fmt.Errorf("failed to open parquet %s: %w", path, err)
+		return manifest.File{}, fmt.Errorf("failed to open parquet %s: %w", path, err)
 	}
 	rows := r.NumRows()
 	if err := r.Close(); err != nil {
-		return manifestFile{}, fmt.Errorf("failed to close parquet %s: %w", path, err)
+		return manifest.File{}, fmt.Errorf("failed to close parquet %s: %w", path, err)
 	}
 
-	return manifestFile{Path: rel, Signal: signal, Rows: rows, Bytes: info.Size()}, nil
+	return manifest.File{Path: rel, Signal: signal, Rows: rows, Bytes: info.Size()}, nil
 }
 
 func (s *Store) tmpDir() string { return filepath.Join(s.opts.DataDir, ".tmp") }
@@ -326,7 +308,7 @@ func (s *Store) admit(name string) (*service, bool) {
 		sv = &service{
 			dir:      filepath.Join(s.opts.DataDir, "services", ServiceDir(name)),
 			builders: map[string]signalBuilder{},
-			manifest: manifest{SchemaVersion: manifestVersion, ServiceName: name},
+			manifest: manifest.Manifest{SchemaVersion: manifest.Version, ServiceName: name},
 		}
 		s.services[name] = sv
 	}
@@ -496,7 +478,7 @@ func (s *Store) flushSignal(sv *service, signal string, b signalBuilder) (err er
 	if err := os.Rename(tmpPath, final); err != nil {
 		return errors.Join(fmt.Errorf("failed to rename parquet into place: %w", err), os.Remove(tmpPath))
 	}
-	if err := syncDir(part); err != nil {
+	if err := manifest.SyncDir(part); err != nil {
 		return err
 	}
 
@@ -505,7 +487,7 @@ func (s *Store) flushSignal(sv *service, signal string, b signalBuilder) (err er
 		return fmt.Errorf("failed to relativise %s: %w", final, err)
 	}
 	prev := sv.manifest
-	sv.manifest.Files = append(append([]manifestFile(nil), prev.Files...), manifestFile{
+	sv.manifest.Files = append(append([]manifest.File(nil), prev.Files...), manifest.File{
 		Path: rel, Signal: signal, Rows: rec.NumRows(), Bytes: size, MinTime: minT.UTC(), MaxTime: maxT.UTC(),
 	})
 	if err := s.publish(sv); err != nil {
@@ -559,66 +541,17 @@ func writeParquet(path string, rec arrow.RecordBatch) (size int64, err error) {
 	return info.Size(), nil
 }
 
-// publish bumps the generation and renames a fully synced copy over manifest.json.
+// publish bumps the generation and atomically replaces manifest.json.
 func (s *Store) publish(sv *service) error {
 	next := sv.manifest
 	next.Generation++
-	data, err := json.MarshalIndent(next, "", "  ")
-	if err != nil {
-		return fmt.Errorf("failed to encode manifest: %w", err)
-	}
-
-	tmpPath := filepath.Join(s.tmpDir(), "manifest-"+ulid.Make().String()+".json")
-	if err := writeSynced(tmpPath, data); err != nil {
-		return errors.Join(err, os.Remove(tmpPath))
-	}
 	if err := os.MkdirAll(sv.dir, 0o700); err != nil {
-		return errors.Join(fmt.Errorf("failed to create service dir: %w", err), os.Remove(tmpPath))
+		return fmt.Errorf("failed to create service dir: %w", err)
 	}
-	if err := os.Rename(tmpPath, filepath.Join(sv.dir, manifestName)); err != nil {
-		return errors.Join(fmt.Errorf("failed to publish manifest: %w", err), os.Remove(tmpPath))
-	}
-	if err := syncDir(sv.dir); err != nil {
+	if err := manifest.Write(s.tmpDir(), filepath.Join(sv.dir, manifest.Name), next); err != nil {
 		return err
 	}
 	sv.manifest = next
-
-	return nil
-}
-
-func writeSynced(path string, data []byte) (err error) {
-	f, err := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600) //nolint:gosec // G304: path is derived from the data dir, never from request input
-	if err != nil {
-		return fmt.Errorf("failed to create %s: %w", path, err)
-	}
-	defer func() {
-		if cerr := f.Close(); cerr != nil && err == nil {
-			err = fmt.Errorf("failed to close %s: %w", path, cerr)
-		}
-	}()
-	if _, err := f.Write(data); err != nil {
-		return fmt.Errorf("failed to write %s: %w", path, err)
-	}
-	if err := f.Sync(); err != nil {
-		return fmt.Errorf("failed to sync %s: %w", path, err)
-	}
-
-	return nil
-}
-
-func syncDir(path string) (err error) {
-	d, err := os.Open(path) //nolint:gosec // G304: path is derived from the data dir, never from request input
-	if err != nil {
-		return fmt.Errorf("failed to open dir %s: %w", path, err)
-	}
-	defer func() {
-		if cerr := d.Close(); cerr != nil && err == nil {
-			err = fmt.Errorf("failed to close dir %s: %w", path, cerr)
-		}
-	}()
-	if err := d.Sync(); err != nil {
-		return fmt.Errorf("failed to sync dir %s: %w", path, err)
-	}
 
 	return nil
 }

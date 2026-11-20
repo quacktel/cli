@@ -1,7 +1,6 @@
 package store
 
 import (
-	"encoding/json"
 	"io"
 	"os"
 	"path/filepath"
@@ -14,6 +13,7 @@ import (
 	"go.opentelemetry.io/collector/pdata/plog"
 
 	"github.com/quacktel/cli/internal/engine"
+	"github.com/quacktel/cli/internal/manifest"
 )
 
 var fixedNow = time.Date(2026, 11, 20, 13, 30, 0, 123456789, time.UTC)
@@ -92,13 +92,11 @@ func parquetFiles(t *testing.T, dir string) []string {
 	return out
 }
 
-func readManifest(t *testing.T, dataDir, name string) manifest {
+func readManifest(t *testing.T, dataDir, name string) manifest.Manifest {
 	t.Helper()
 
-	data, err := os.ReadFile(filepath.Join(dataDir, "services", ServiceDir(name), "manifest.json"))
+	m, err := manifest.Read(filepath.Join(dataDir, "services", ServiceDir(name), manifest.Name))
 	require.NoError(t, err)
-	var m manifest
-	require.NoError(t, json.Unmarshal(data, &m))
 
 	return m
 }
@@ -259,6 +257,35 @@ func TestReconcile(t *testing.T) {
 	for _, f := range m.Files {
 		require.EqualValues(t, 1, f.Rows)
 	}
+}
+
+func TestReconcileSkipsRetired(t *testing.T) {
+	dataDir := newDataDir(t)
+	t.Setenv("HOME", t.TempDir())
+	s, err := Open(t.Context(), Options{DataDir: dataDir, Now: func() time.Time { return fixedNow }})
+	require.NoError(t, err)
+	_, _, err = s.AppendLogs(t.Context(), logsFor("svc"))
+	require.NoError(t, err)
+	require.NoError(t, s.Flush(t.Context()))
+	require.NoError(t, s.Close())
+
+	svcDir := filepath.Join(dataDir, "services", ServiceDir("svc"))
+	path := filepath.Join(svcDir, manifest.Name)
+	m, err := manifest.Read(path)
+	require.NoError(t, err)
+	require.Len(t, m.Files, 1)
+	m.Retired = []manifest.Retired{{Path: m.Files[0].Path, DeleteAfter: fixedNow}}
+	m.Files = nil
+	require.NoError(t, manifest.Write(filepath.Join(dataDir, ".tmp"), path, m))
+
+	s2, err := Open(t.Context(), Options{DataDir: dataDir})
+	require.NoError(t, err)
+	require.NoError(t, s2.Close())
+
+	got := readManifest(t, dataDir, "svc")
+	require.Empty(t, got.Files)
+	require.Equal(t, m.Retired, got.Retired)
+	require.Equal(t, m.Generation, got.Generation)
 }
 
 func TestLock(t *testing.T) {

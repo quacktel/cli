@@ -13,6 +13,7 @@ import (
 	"go.opentelemetry.io/collector/pdata/ptrace"
 
 	"github.com/quacktel/cli/internal/engine"
+	"github.com/quacktel/cli/internal/manifest"
 )
 
 var (
@@ -193,7 +194,7 @@ func TestMixedBatchWritesPerSignalFiles(t *testing.T) {
 
 	m := readManifest(t, dataDir, "mixed")
 	require.Len(t, m.Files, 2)
-	bySignal := map[string]manifestFile{}
+	bySignal := map[string]manifest.File{}
 	for _, f := range m.Files {
 		bySignal[f.Signal] = f
 		require.True(t, strings.HasPrefix(f.Path, f.Signal+"/"), f.Path)
