@@ -68,7 +68,10 @@ func Render(p Plist) ([]byte, error) {
 	}
 	buf.WriteByte('\n')
 
-	return buf.Bytes(), nil
+	// launchd rejects <true></true> with "Bootstrap failed: 5" although plutil accepts it; escaped user text can never contain these tags.
+	out := bytes.ReplaceAll(buf.Bytes(), []byte("<true></true>"), []byte("<true/>"))
+
+	return bytes.ReplaceAll(out, []byte("<false></false>"), []byte("<false/>")), nil
 }
 
 // ReadPlist parses a plist written by Render.

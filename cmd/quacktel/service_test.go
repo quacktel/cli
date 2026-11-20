@@ -93,7 +93,12 @@ func TestServiceLaunchdReal(t *testing.T) {
 	require.NoError(t, err)
 	label := randomLabel(t)
 	plist := filepath.Join(home, "Library", "LaunchAgents", label+".plist")
-	t.Cleanup(func() { _, _, _ = runBinHome(t, home, "service", "uninstall", "--label", label) })
+	// t.Context is already cancelled when cleanups run, so uninstall needs its own context.
+	t.Cleanup(func() {
+		cmd := exec.Command(binPath, "service", "uninstall", "--label", label)
+		cmd.Env = append(os.Environ(), "HOME="+home)
+		_ = cmd.Run()
+	})
 
 	addr := freeAddr(t)
 	dir := dataDir(t)

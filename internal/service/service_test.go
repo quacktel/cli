@@ -53,7 +53,11 @@ func TestRenderEscapesAndRoundTrips(t *testing.T) {
 	require.NotContains(t, out, `a&b<c`)
 	require.Contains(t, out, `<plist version="1.0">`)
 	require.Contains(t, out, "<key>ThrottleInterval</key>\n\t\t<integer>30</integer>")
-	require.Contains(t, out, "<key>SuccessfulExit</key>\n\t\t\t<false></false>")
+	// launchd fails to bootstrap a plist with <true></true>, so booleans must be self-closing.
+	require.Contains(t, out, "<key>RunAtLoad</key>\n\t\t<true/>")
+	require.Contains(t, out, "<key>SuccessfulExit</key>\n\t\t\t<false/>")
+	require.NotContains(t, out, "<true></true>")
+	require.NotContains(t, out, "<false></false>")
 
 	path := filepath.Join(t.TempDir(), "p.plist")
 	require.NoError(t, os.WriteFile(path, data, 0o600))
