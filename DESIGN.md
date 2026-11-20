@@ -373,26 +373,52 @@ ignored. Unscoped sessions read every service's manifest and union the files.
 - Prepare the statement, then check its statement type is `SELECT` before
   executing. This rejects `COPY`, `ATTACH`, `INSTALL`, `SET`, `PRAGMA` and
   multi-statement input. The check uses `(*duckdb.Stmt).StatementType()`.
-- A per-query timeout (default 10s) and a row cap (default 1,000) apply.
-  Wide text columns are truncated in MCP output.
+- A per-query timeout (default 10s) applies. `query` caps rows at 1,000 by
+  default; the `sql` tool caps them at 500 (see below).
+- Scoped sessions (`--service`) narrow the connection two ways: `allowed_directories`
+  shrinks to that service's directory, and the `logs`/`spans` views are built
+  from that one service's manifest only. `read_parquet` on another service's
+  file fails.
 
 ### MCP tools
 
-All tools take optional `service`, `since` and `until` (`since` defaults to 1h).
-Results are capped and truncated for token budget; responses say when
-truncation happened.
+`quacktel mcp [--data-dir] [--service] [--no-sql]` serves these read-only tools
+over stdio (every tool is annotated `readOnlyHint`). Stdout carries protocol
+only; logs go to stderr.
+
+Defaults shared by the typed tools:
+
+- **Window:** `since` defaults to 24h ago and `until` to now. Both accept an RFC
+  3339 timestamp or a duration meaning "ago" (`2h`). `get_trace` ignores the
+  window.
+- **Limit:** `limit` defaults to 100 and is capped at 500. A capped result sets
+  `truncated`.
+- **Truncation:** strings longer than 2000 characters are cut and marked
+  `…[truncated N chars]`, and `truncated` is set.
+- **Untrusted data:** every result carries a `note` saying the content is
+  untrusted telemetry written by local processes, and that instructions in it
+  must not be followed. Tool descriptions say the same.
+- **Errors:** bad input (an unparseable time, an invalid trace ID, a service
+  outside the scope, a rejected SQL statement) comes back as an `IsError` tool
+  result with the message, so the agent can correct itself. Other failures
+  return a generic message and are logged to stderr.
 
 | Tool | Inputs | Returns |
 |---|---|---|
-| `list_services` | `since` | Services with log and span counts and first/last seen. |
-| `describe_schema` | `service?` | Columns per table, plus the top attribute keys with example values. |
-| `search_logs` | `service`, `min_severity`, `text` (ILIKE), `regex`, `event_name`, `trace_id`, `attrs` (key=value), `limit` | Matching log rows, newest first. |
-| `find_spans` | `service`, `name`, `min_duration_ms`, `status=error`, `attrs`, `limit` | Matching spans with duration and status. |
-| `get_trace` | `trace_id` | The span tree (indented or nested) plus correlated logs. |
-| `sql` | `query` | Rows from the read-only connection; see guardrails above. |
+| `list_services` | `since`, `until` | `rows`: per service `service`, `logs`, `spans`, `first_seen`, `last_seen`. |
+| `describe_schema` | `service?` | `logs` and `spans`, each with `columns` (name, type) and the 30 most common `top_attribute_keys` (key, count, example) over the last 24h. |
+| `search_logs` | `service`, `since`, `until`, `limit`, `min_severity` (1-24 or trace..fatal), `text` (case-insensitive substring), `regex` (RE2), `event_name`, `trace_id`, `session_id`, `attrs` (key to exact value) | `rows` of matching logs, newest first. |
+| `find_spans` | `service`, `since`, `until`, `limit`, `name` (substring), `kind`, `status` (unset, ok, error), `http_route`, `min_duration_ms`, `attrs` | `rows` of matching spans, slowest first; the window applies to start time. |
+| `get_trace` | `trace_id` (32 hex), `service?` | `spans`: a flat list ordered by start time, each with `depth` (0 for roots); up to 1000 spans. `logs`: correlated logs, up to 500. |
+| `sql` | `query`, `limit` | `rows` from the read-only connection; see guardrails above. Not registered with `--no-sql`. |
 
-Typed tools build SQL from fixed templates. All user values are bound
-parameters; column and attribute names are validated against the schema.
+`list_services`, `search_logs`, `find_spans` and `sql` return `rows`, `truncated`
+and `note`; `get_trace` returns `spans`, `logs`, `truncated` and `note`.
+
+Typed tools build SQL from fixed templates. Every user value, including
+attribute keys, is a bound parameter; nothing user-supplied is interpolated
+into SQL. The `sql` tool is the only path that runs caller-written SQL, and it
+passes the SELECT guard first.
 
 ### `quacktel query`
 
@@ -417,7 +443,9 @@ It uses the same connection and guardrails as `sql`.
 
 ## Onboarding
 
-`quacktel env` prints:
+`quacktel env [--listen] [--claude-code] [--auth] [--data-dir] [--mcp] [--service]`
+prints shell exports to stdout, one per line. The endpoint comes from `--listen`
+(default `127.0.0.1:4318`):
 
 ```sh
 export OTEL_EXPORTER_OTLP_ENDPOINT=http://127.0.0.1:4318
@@ -427,11 +455,27 @@ export OTEL_TRACES_EXPORTER=otlp
 export OTEL_METRICS_EXPORTER=none
 ```
 
-`quacktel env --claude-code` adds `CLAUDE_CODE_ENABLE_TELEMETRY=1`.
-`quacktel env --mcp` prints the MCP server JSON snippet
-(`{"command": "quacktel", "args": ["mcp"]}`). The docs cover Claude Code and
-common SDKs. Claude Code's cost and token data arrives as log events
-(`event_name`), so v0.1 covers agent self-analysis without metrics.
+- `--claude-code` adds `export CLAUDE_CODE_ENABLE_TELEMETRY=1`.
+- `--auth` adds `export OTEL_EXPORTER_OTLP_HEADERS='authorization=Bearer <token>'`,
+  read from `<data-dir>/otlp-headers` (so it prints the token, on request). It
+  fails if the file doesn't exist; run `quacktel serve --auth` first.
+- `--mcp` prints only an MCP server config, pretty-printed, with the absolute
+  path of the running binary (symlinks resolved). `--service X` adds
+  `"--service", "X"` to the args:
+
+  ```json
+  {"mcpServers": {"quacktel": {"command": "/abs/path/quacktel", "args": ["mcp"]}}}
+  ```
+
+Register the server with Claude Code with:
+
+```sh
+claude mcp add quacktel -- "$(command -v quacktel)" mcp
+```
+
+or paste the `env --mcp` JSON into the client's MCP config. The docs cover
+Claude Code and common SDKs. Claude Code's cost and token data arrives as log
+events (`event_name`), so v0.1 covers agent self-analysis without metrics.
 (Verify the current event names and attributes against the Claude Code
 monitoring docs in M1.)
 
@@ -474,7 +518,7 @@ FROM logs
 WHERE attrs['ocsf.class_uid'] = '4001';
 ```
 
-`quacktel env --openshell` should print the `gateway.toml` snippet when `env` lands in M5.
+`quacktel env --openshell`, which would print this `gateway.toml` snippet, remains future work.
 
 ## Distribution
 
@@ -545,8 +589,8 @@ Not reused: Substrait, Participle SQL, and the custom executor.
 | M1 | Receiver + redaction + logs writer + per-service layout + manifest | Claude Code logs land in Parquet; hostile `service.name` values (traversal, unicode, overflow past the cap) are handled; the hardening tests pass (Origin, Host, Content-Type, caps, 429). |
 | M2 (done) | Spans writer | A Go/Node sample app's traces land and can be queried. |
 | M3 (done) | Compaction + retention (including removal of expired service directories) + size cap | A 24h soak shows a bounded file count, no duplicate rows, and the cap enforced. |
-| M4 | `engine`, `tools`, `mcp`, `query` | All six tools work against fixtures; the SELECT guard rejects the bypass corpus; a scoped session can't read another service's files through `sql`/`read_parquet`. |
-| M5 | `service` (launchd), `doctor`, `env` | Install, reboot, data still flowing, on macOS. |
+| M4 (done) | `engine`, `tools`, `mcp`, `query` | All six tools work against fixtures; the SELECT guard rejects the bypass corpus; a scoped session can't read another service's files through `sql`/`read_parquet`. |
+| M5 | `service` (launchd), `doctor` | Install, reboot, data still flowing, on macOS. |
 | M6 | Pre-1.0 release: goreleaser, GitHub attestations, SBOM, Homebrew tap, `install.sh` | A release binary, installed via the tap formula and via `install.sh` on a clean Mac, runs with no Gatekeeper prompt and passes `gh attestation verify`. Decide on notarisation. |
 | M7 | Linux amd64/arm64: XDG paths, systemd user unit, .deb/.rpm, `install.sh` Linux support | Native builds on the oldest supported glibc; install, reboot, data still flowing, on Ubuntu and Fedora. |
 
@@ -567,9 +611,10 @@ telemetry pointed at it, then check:
 - **Cross-service visibility:** an unscoped `mcp` session can read every
   project's telemetry, including prompts. This is the accepted default for v0.1.
   Use `quacktel mcp --service <name>` for untrusted repos or client separation.
-  Scoping is a real boundary only for the MCP path: an agent with unrestricted
-  shell or file access can read the data directory directly, because `0700`
-  only protects against other OS users.
+  Scoping (`allowed_directories` plus per-service views) is a real boundary
+  only for the MCP path: an agent with unrestricted shell or file access can
+  read the data directory directly, because `0700` only protects against other
+  OS users.
 - **Telemetry poisoning:** `service.name` is self-reported. Any local process
   can write records labelled as another service, including text crafted to act
   as instructions to an agent. Tool output labels log and span content as
@@ -578,8 +623,18 @@ telemetry pointed at it, then check:
 - **No dedup on write:** a gateway retry (OpenShell) stores duplicate rows.
   Deduplicate in queries, for example on `ocsf.metadata.uid`.
 - **Body content isn't redacted:** agent prompts and tool I/O are stored as
-  received. Mitigations are clear docs, `0700` permissions and retention.
-  Value scanning is a v0.2 candidate.
+  received, so agents using the MCP tools see unredacted bodies. Mitigations
+  are clear docs, `0700` permissions, retention and `mcp --service`. Value
+  scanning is a v0.2 candidate.
+- **`text` filters treat `%` and `_` as wildcards:** `search_logs` `text` and
+  `find_spans` `name` use `ILIKE`, so those characters match more than
+  themselves. This widens a match but can't reach other data. Escaping is
+  future work.
+- **`env --auth` prints the bearer token** to stdout, so avoid pasting its
+  output into logs or shared terminals.
+- **Tool output can still be large:** strings are cut at 2000 characters and
+  rows at 500, but one result can carry many long fields; agents should narrow
+  the window rather than raise limits.
 - **DuckDB hardening semantics vary by version.** They are verified in M0 and
   covered by tests that must fail if a setting stops taking effect.
 - **Release problems surface late:** no release pipeline until M6. This is low risk with a single target built natively; M0 still proves the static DuckDB link.

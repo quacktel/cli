@@ -453,11 +453,9 @@ func readStats(t *testing.T, dir string) map[string]any {
 	return stats
 }
 
-func TestServeTracesFromGoApp(t *testing.T) {
-	addr := freeAddr(t)
-	dir := dataDir(t)
-	p := startServe(t, addr, dir)
-
+// runGoApp builds examples/otel-go-app and runs it once against the receiver at addr.
+func runGoApp(t *testing.T, addr string) {
+	t.Helper()
 	appBin := filepath.Join(t.TempDir(), "app")
 	build := exec.CommandContext(t.Context(), "go", "build", "-C", filepath.Join("..", "..", "examples", "otel-go-app"), "-o", appBin, ".")
 	// The example is built without the race detector, which the test run's GOFLAGS may request.
@@ -474,6 +472,14 @@ func TestServeTracesFromGoApp(t *testing.T) {
 		"HOME="+t.TempDir())
 	out, err = app.CombinedOutput()
 	require.NoError(t, err, string(out))
+}
+
+func TestServeTracesFromGoApp(t *testing.T) {
+	addr := freeAddr(t)
+	dir := dataDir(t)
+	p := startServe(t, addr, dir)
+
+	runGoApp(t, addr)
 
 	require.NoError(t, p.cmd.Process.Signal(syscall.SIGTERM))
 	require.NoError(t, p.wait(t), p.stderr.String())

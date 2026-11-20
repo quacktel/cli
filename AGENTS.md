@@ -64,6 +64,8 @@ The `cmd/quacktel` tests build and run the real binary. `examples/otel-go-app` i
 - Data files and directories are created `0600` and `0700`.
 - When auth is on, the token is never logged, and the headers file is 0600 and validated at startup.
 - Logs go to stderr and results go to stdout.
+- `quacktel mcp` writes only protocol to stdout; logs go to stderr.
+- Typed MCP tools never interpolate user input into SQL; values and attribute keys are bound parameters.
 
 ## Code conventions
 
