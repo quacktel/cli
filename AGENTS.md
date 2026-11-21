@@ -12,12 +12,13 @@ Test fixtures use synthetic telemetry only. Never commit captured real telemetry
 
 ## Workflow
 
-Until 1.0, this repo uses trunk-based development: commit directly to `main`, with no pull requests.
+All changes go through pull requests into `main`; do not commit directly to `main`.
 
+- Create a short-lived branch per change and open a pull request against `main`.
 - Use Conventional Commits. Squash noisy local work before pushing, because history is public.
-- The pre-commit hooks and CI on `main` are the gate. When CI fails on `main`, fix it before adding anything else.
+- The pre-commit hooks and CI checks are the gate. When CI fails on `main`, fix it before adding anything else.
 - Never force-push `main`.
-- Subagent worktree branches are short-lived. Review them, merge them into `main` locally, and delete them.
+- Subagent worktree branches are short-lived. Review them, merge them into the working branch locally, and delete them.
 
 ## Tooling
 
