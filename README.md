@@ -1,8 +1,17 @@
 # quacktel
 
-A local OpenTelemetry sink for coding agents. `quacktel` receives OTLP logs and
-traces on `127.0.0.1`, stores them as Parquet on your machine, and lets agents
-query them over MCP. Telemetry never leaves the machine.
+An agent-first, local [OpenTelemetry](https://opentelemetry.io) sink for local
+development and coding agents. `quacktel` receives OTLP logs and traces on
+`127.0.0.1`, stores them as [Apache Parquet](https://parquet.apache.org) on
+your machine, and lets agents query them over the
+[Model Context Protocol (MCP)](https://modelcontextprotocol.io). Telemetry never
+leaves the machine.
+
+It lets agents check that the software they're building actually works before
+it's released. Storage is written with [Apache Arrow](https://arrow.apache.org)
+and queried with [DuckDB](https://duckdb.org). It works with
+[Claude Code](https://claude.ai/code) and any app instrumented with an
+OpenTelemetry SDK.
 
 ## Contents
 
@@ -22,17 +31,30 @@ query them over MCP. Telemetry never leaves the machine.
 
 ## About
 
-Coding agents like Claude Code already emit OpenTelemetry: cost, tokens, tool
-calls and, if you opt in, prompts. Most of the time that data goes nowhere, or
-to a hosted backend you'd rather not send your prompts and file paths to.
-quacktel keeps it on your machine, in plain Parquet files, and hands it back to
-the agent through MCP so it can answer questions about its own sessions.
+Coding agents can write and test code, but passing tests don't show what the
+software does when it runs: which requests it makes, where it's slow, what it
+logs when something goes wrong. That's what telemetry is for, and agents rarely
+get to see it during development.
+
+quacktel gives them that view, locally. Point your app's OpenTelemetry SDK at
+quacktel, run it, and the agent queries the resulting logs and traces to confirm
+the change behaves as intended: the expected spans are there, nothing errored,
+latency hasn't regressed. The same store holds the agent's own telemetry, so
+you can see what a coding session cost and where its time went.
+
+**Agent-first.** MCP is the primary interface, not an add-on. The tools are
+read-only, keep results within an agent's context budget, and label telemetry
+as untrusted data. The typed tools bind every value as a parameter, and raw SQL
+can be switched off with `--no-sql`. The CLI
+(`query`, `doctor`) is there for humans and scripts.
 
 Use it to:
 
-- let Claude Code analyse its own sessions: cost, tokens, slow tools, errors;
-- debug the apps you're building from their logs and traces;
-- collect [OpenShell](#openshell) sandbox network events.
+- **validate changes locally**: let an agent run your app and check its traces
+  and logs for errors, missing calls and slow paths before you ship;
+- **observe coding agents**: cost, tokens, tool calls and failures across Claude
+  Code sessions;
+- **collect sandbox events**: [OpenShell](#openshell) sandbox network events.
 
 > **Status:** pre-1.0. Supported on macOS on Apple silicon. Linux release
 > archives are published but untested, and the background service is macOS
@@ -40,6 +62,9 @@ Use it to:
 
 ### Features
 
+- **MCP server for agents**: `quacktel mcp` exposes six read-only tools:
+  `list_services`, `describe_schema`, `search_logs`, `find_spans`, `get_trace`
+  and `sql`. Sessions can be scoped to one service.
 - **OTLP/HTTP receiver**: logs and traces, protobuf or JSON, gzip. Metrics are
   accepted and dropped.
 - **Locked down by default**: listens on loopback only, rejects browser requests
@@ -53,9 +78,6 @@ Use it to:
   30-day retention and a 10 GiB disk cap by default.
 - **SQL over your telemetry**: `quacktel query` runs read-only DuckDB SQL over
   `logs` and `spans` views.
-- **MCP server for agents**: `quacktel mcp` exposes six read-only tools:
-  `list_services`, `describe_schema`, `search_logs`, `find_spans`, `get_trace`
-  and `sql`. Sessions can be scoped to one service.
 - **Background service**: `quacktel service install` runs the receiver as a
   per-user launchd agent that survives logout and reboot.
 - **Health checks**: `quacktel doctor` checks the receiver, the service, the
