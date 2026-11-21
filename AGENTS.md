@@ -1,8 +1,8 @@
 `DESIGN.md` is the source of truth for scope and decisions. When a change departs from it, update `DESIGN.md` in the same change.
 
-## Treat this repository as public
+## Public repository
 
-This repository is private for now but will be made public. Assume everything committed, including history, will be published.
+This repository is public. Assume everything committed, including history, is visible.
 
 Keep secrets and private details out of commits, code, tests, issues and pull requests. That includes API keys, 1Password references (vault, item or field names), account details and private paths. Use placeholders such as `op://<vault>/<item>/<field>`.
 
@@ -14,7 +14,7 @@ Test fixtures use synthetic telemetry only. Never commit captured real telemetry
 
 Until 1.0, this repo uses trunk-based development: commit directly to `main`, with no pull requests.
 
-- Use Conventional Commits. Squash noisy local work before pushing, because history will be public.
+- Use Conventional Commits. Squash noisy local work before pushing, because history is public.
 - The pre-commit hooks and CI on `main` are the gate. When CI fails on `main`, fix it before adding anything else.
 - Never force-push `main`.
 - Subagent worktree branches are short-lived. Review them, merge them into `main` locally, and delete them.
@@ -27,13 +27,13 @@ Until 1.0, this repo uses trunk-based development: commit directly to `main`, wi
 
 ## Verification
 
-Fast loop: `go test ./...`
+Fast loop: `mise exec -- go test ./...`
 
 Before finishing, after your last edit:
 
 ```sh
-go vet ./... && go test -race -count=1 ./...
-mise exec -- golangci-lint run ./...
+mise exec -- go vet ./... && mise run test
+mise run check:lint
 mise run check:tidy
 ```
 
@@ -41,35 +41,43 @@ The `cmd/quacktel` tests build and run the real binary. `examples/otel-go-app` i
 
 ## Guiding principles
 
-- **Validate upfront.** `serve` checks its config, bind address, data-dir permissions and limits before it listens, and exits on failure. `doctor` reuses the same checks. A problem should appear at startup, not when the first request arrives.
-- **Local and least-privilege by default.** A new feature must not widen the network surface, the read path's file access, or what reaches disk unredacted, unless `DESIGN.md` is updated to say so.
+- Validate upfront: `serve` checks its config, bind address, data-dir permissions and limits before it listens, and exits on failure. `doctor` reuses the same checks. A problem should appear at startup, not when the first request arrives.
+- Stay local and least-privilege by default: a new feature must not widen the network surface, the read path's file access, or what reaches disk unredacted, unless `DESIGN.md` is updated to say so.
 
 ## Invariants
 
+### Receiver and redaction
+
 - Only the OTLP receiver listens, and only on loopback, unless `--unsafe-bind` is given. Never add a query listener; MCP is stdio only.
-- The receiver rejects requests that carry `Origin`, a `Host` other than `localhost` or `127.0.0.1` on the receiver's port, or a content type other than `application/x-protobuf` or `application/json`. Body and decompressed sizes are capped. A full buffer returns `429`, and nothing grows without bound.
+- The receiver rejects requests that carry `Origin`, a `Host` other than `localhost` or `127.0.0.1` on the receiver's port (or the bound `host:port` under `--unsafe-bind`), or a content type other than `application/x-protobuf` or `application/json`. Body and decompressed sizes are capped. A full buffer returns `429`, and nothing grows without bound.
 - Redaction runs before anything is buffered or written.
+- When auth is on, the token is never logged, and the headers file is `0600` and validated at startup.
+
+### Storage
+
 - One `quacktel serve` per data dir, enforced by a flock on `.lock`.
 - Partitions use receive time, never record time, so skewed timestamps can't write into old partitions.
 - `service.name` is untrusted. It reaches the filesystem only as the slug and hash directory name, never as a path itself.
 - Every file is written to `.tmp`, fsynced, then renamed into place. Nothing is written in place, and that includes manifests.
+- Data files and directories are created `0600` and `0700`.
 - Readers open only the files a manifest lists, through the `logs`/`spans` views, never a glob. A file a manifest stops listing is unlinked only after the grace period.
 - Startup deletes retired files and uncommitted merge outputs (`sealed-*`, `hour-*`); only unlisted `tail-*` files are reconciled into the manifest.
 - Parquet is written and merged outside the store lock.
+
+### Read path and MCP
+
 - The daemon never opens DuckDB. DuckDB is on the read path only, and it never installs or loads extensions at runtime.
-- Every reader connection applies the hardening settings in `DESIGN.md` and sets `lock_configuration = true` last. Scoped sessions restrict `allowed_directories` to that service's directory.
-- The engine's `allowed_directories` never includes the data dir root: unscoped is `<data>/services`, scoped is one service dir.
+- Every reader connection applies the hardening settings in `DESIGN.md` and sets `lock_configuration = true` last. `allowed_directories` never includes the data dir root: unscoped is `<data>/services`, and scoped sessions restrict it to that single service directory.
 - Raw SQL runs only after the prepared statement's type is confirmed as `SELECT`.
-- Typed tools bind every user value as a parameter. Column and attribute names are validated against the schema, never interpolated unchecked.
+- Typed MCP tools never interpolate user input into SQL; all user values and attribute keys are bound parameters.
 - MCP tool output marks telemetry content as untrusted data, because any local process can write it.
-- Data files and directories are created `0600` and `0700`.
-- When auth is on, the token is never logged, and the headers file is 0600 and validated at startup.
-- The service plist is rendered through `encoding/xml` with self-closing booleans and written with mode 0644; tests only call launchctl through the injectable runner, except the opt-in `QUACKTEL_TEST_LAUNCHD=1` test.
+
+### Service and CLI
+
+- The service plist is rendered through `encoding/xml` with self-closing booleans and written with mode `0644`; tests only call `launchctl` through the injectable runner, except the opt-in `QUACKTEL_TEST_LAUNCHD=1` test.
 - After `launchctl bootout`, wait for the job to be gone before `bootstrap`; launchd fails with status 5 otherwise.
 - `doctor` never mutates state; the flock probe releases immediately.
-- Logs go to stderr and results go to stdout.
-- `quacktel mcp` writes only protocol to stdout; logs go to stderr.
-- Typed MCP tools never interpolate user input into SQL; values and attribute keys are bound parameters.
+- Logs go to stderr; stdout carries only command results (or MCP protocol in `quacktel mcp`).
 
 ## Code conventions
 
@@ -99,7 +107,7 @@ Use lowercase, single-word names that describe the domain, not the layer: `recei
 
 ### Comments
 
-Comment only the **why**, never the **what**. Don't write docstrings for obvious functions. One line is the maximum.
+Comment only the why, never the what. Don't write docstrings for obvious functions. One line is the maximum.
 
 ## Testing
 
