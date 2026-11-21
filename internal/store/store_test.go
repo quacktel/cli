@@ -360,5 +360,6 @@ func TestReceiveTimePartition(t *testing.T) {
 	files := parquetFiles(t, dataDir)
 	require.Len(t, files, 1)
 	require.Contains(t, files[0], filepath.Join("date=2026-11-20", "hour=13"))
-	require.NotContains(t, files[0], "2001")
+	// Match the partition, not "2001", because t.TempDir names carry random digits.
+	require.NotContains(t, files[0], "date=2001")
 }
