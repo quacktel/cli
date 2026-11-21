@@ -676,6 +676,10 @@ It installs to `~/.local/bin` (`--prefix` overrides).
   provenance verifier. GitHub's own release attestation works regardless of CI.
 - The formula uses goreleaser's deprecated `brews`, because casks get
   `com.apple.quarantine` and can't offer `brew services`.
+- Every build agent generates a formula for its own archive, so only the macOS
+  agent uploads it, and publish refuses a formula that isn't the macOS one for
+  the tag. rc.2 and rc.3 shipped the Linux arm64 formula before this check; the
+  rc.3 tap formula was fixed by hand.
 - The SBOM lists DuckDB by its Go module versions (`duckdb-go`, `libduckdb`),
   not as a C++ component.
 - **Notarisation is deferred past 1.0.** It needs a paid Apple Developer
@@ -715,7 +719,7 @@ Not reused: Substrait, Participle SQL, and the custom executor.
 | M3 (done) | Compaction + retention (including removal of expired service directories) + size cap | A 24h soak shows a bounded file count, no duplicate rows, and the cap enforced. |
 | M4 (done) | `engine`, `tools`, `mcp`, `query` | All six tools work against fixtures; the SELECT guard rejects the bypass corpus; a scoped session can't read another service's files through `sql`/`read_parquet`. |
 | M5 (done) | `service` (launchd), `doctor` | Install, reboot, data still flowing, on macOS. |
-| M6 (done, pending tap smoke test) | Pre-1.0 release: goreleaser, SBOMs, immutable one-shot releases, keyless provenance, Homebrew tap, `install.sh` | Verified on v0.2.0-rc.3: `install.sh` installs with checksum, release-attestation and provenance checks. Left: `brew upgrade` plus `brew services` smoke test. Notarisation deferred past 1.0. |
+| M6 (done) | Pre-1.0 release: goreleaser, SBOMs, immutable one-shot releases, keyless provenance, Homebrew tap, `install.sh` | Verified on v0.2.0-rc.3: `install.sh` installs with checksum, release-attestation and provenance checks; the tap formula installs with no quarantine attribute and passes `brew test`. Notarisation deferred past 1.0. |
 | M7 | Linux amd64/arm64: XDG paths, systemd user unit, .deb/.rpm, `install.sh` Linux support | Native builds on the oldest supported glibc; install, reboot, data still flowing, on Ubuntu and Fedora. |
 
 ## Risks and open questions
