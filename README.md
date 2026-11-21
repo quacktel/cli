@@ -54,7 +54,8 @@ Use it to:
   and logs for errors, missing calls and slow paths before you ship;
 - **observe coding agents**: cost, tokens, tool calls and failures across Claude
   Code sessions;
-- **collect sandbox events**: [OpenShell](#openshell) sandbox network events.
+- **collect sandbox events**: [NVIDIA OpenShell](https://www.nvidia.com/en-us/ai/openshell/) sandbox network events
+  (see [OpenShell](#openshell)).
 
 > **Status:** pre-1.0. Supported on macOS on Apple silicon. Linux release
 > archives are published but untested, and the background service is macOS
@@ -243,7 +244,7 @@ slowest spans from my app in the last hour"*.
 
 ## OpenShell
 
-The OpenShell gateway can export sandbox network events (OCSF) as OTLP logs.
+The [OpenShell](https://www.nvidia.com/en-us/ai/openshell/) gateway can export sandbox network events (OCSF) as OTLP logs.
 With quacktel running with `--auth` (the default for `service install`), add
 this to the gateway's `gateway.toml`:
 
