@@ -480,6 +480,8 @@ It uses the same connection and guardrails as `sql`.
   so a typo fails at install, not at the first launchd restart. The agent always
   runs with `--auth`, because it has no terminal to prompt on. A relative
   `--data-dir` is recorded as an absolute path, because launchd runs with cwd `/`.
+  A binary under a Homebrew `Cellar/<formula>/<version>/` is recorded by its
+  `opt/<formula>/` symlink, because `brew upgrade` deletes the versioned dir.
 - **Logs:** `--log-file` writes `serve.log` rotated at 10 MiB, keeping 3 old
   files. launchd's own capture (`launchd.log`) holds crashes that happen before
   the logger starts. If rotation can't reopen the file, writes fall back to
@@ -502,7 +504,9 @@ It never mutates state; the flock probe releases immediately. Checks, in order:
 3. `serve_lock`: the flock on `.lock` is held, so a `serve` owns the data dir.
 4. `receiver`: `GET /v1/logs` returns 405 with `Allow: POST`.
 5. `service`: the plist's binary exists and matches the running one (warn if
-   not), and launchd reports the agent loaded and running.
+   not), and launchd reports the agent loaded and running. Without quacktel's
+   own agent it checks the `brew services` agent (`homebrew.mxcl.quacktel`)
+   instead, and warns if both are installed.
 6. `stats`: `write_errors` or `disk_cap_exceeded` fail; `pending_batches` or
    `responses_429` warn. The counters reset when `serve` restarts.
 7. `disk`: warns at 80% of `--max-disk`.

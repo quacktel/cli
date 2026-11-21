@@ -11,6 +11,9 @@ import (
 // DefaultLabel is the launchd label of the real agent.
 const DefaultLabel = "dev.quacktel.serve"
 
+// BrewLabel is the launchd label brew services gives the formula's service.
+const BrewLabel = "homebrew.mxcl.quacktel"
+
 // Plist is the subset of a launchd job definition that quacktel writes.
 type Plist struct {
 	Label            string

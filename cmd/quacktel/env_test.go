@@ -134,3 +134,20 @@ func TestEnvAuthReadsInstalledServiceDataDir(t *testing.T) {
 	require.NoError(t, err, stderr)
 	require.Contains(t, out, "OTEL_EXPORTER_OTLP_HEADERS='"+tokenB+"'")
 }
+
+func TestBrewStablePath(t *testing.T) {
+	prefix, err := filepath.EvalSymlinks(t.TempDir())
+	require.NoError(t, err)
+	cellar := filepath.Join(prefix, "Cellar", "quacktel", "0.1.0", "bin", "quacktel")
+	require.NoError(t, os.MkdirAll(filepath.Dir(cellar), 0o700))
+	require.NoError(t, os.WriteFile(cellar, nil, 0o700))
+
+	require.Equal(t, cellar, brewStablePath(cellar), "no opt symlink")
+
+	require.NoError(t, os.MkdirAll(filepath.Join(prefix, "opt"), 0o700))
+	require.NoError(t, os.Symlink(filepath.Join(prefix, "Cellar", "quacktel", "0.1.0"), filepath.Join(prefix, "opt", "quacktel")))
+	require.Equal(t, filepath.Join(prefix, "opt", "quacktel", "bin", "quacktel"), brewStablePath(cellar))
+
+	other := filepath.Join(prefix, "bin", "quacktel")
+	require.Equal(t, other, brewStablePath(other), "not in a Cellar")
+}

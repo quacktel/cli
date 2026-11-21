@@ -170,47 +170,69 @@ func checkReceiver(ctx context.Context, cfg Config) Check {
 }
 
 func checkService(ctx context.Context, cfg Config) Check {
-	if _, err := os.Stat(cfg.PlistPath); errors.Is(err, fs.ErrNotExist) {
-		return check("service", OK, "no LaunchAgent installed")
+	brewPlist := filepath.Join(filepath.Dir(cfg.PlistPath), service.BrewLabel+".plist")
+	own, brew := exists(cfg.PlistPath), exists(brewPlist)
+	switch {
+	case own && brew:
+		return check("service", Warn, "both %s and %s (brew services) are installed but only one serve can hold the data dir; remove one", cfg.Label, service.BrewLabel)
+	case brew:
+		return checkAgent(ctx, cfg, service.BrewLabel, brewPlist, "brew services restart quacktel")
+	case own:
+		return checkAgent(ctx, cfg, cfg.Label, cfg.PlistPath, "quacktel service install")
 	}
-	p, err := service.ReadPlist(cfg.PlistPath)
+
+	return check("service", OK, "no LaunchAgent installed")
+}
+
+func exists(path string) bool {
+	_, err := os.Stat(path)
+
+	return !errors.Is(err, fs.ErrNotExist)
+}
+
+// checkAgent checks one installed agent; fix is the command that reinstalls or restarts it.
+func checkAgent(ctx context.Context, cfg Config, label, plistPath, fix string) Check {
+	p, err := service.ReadPlist(plistPath)
 	if err != nil {
 		return check("service", Fail, "%v", err)
 	}
 	if len(p.ProgramArguments) == 0 {
-		return check("service", Fail, "%s records no program arguments", cfg.PlistPath)
+		return check("service", Fail, "%s records no program arguments", plistPath)
 	}
 	recorded := p.ProgramArguments[0]
 	if _, err := os.Stat(recorded); err != nil {
-		return check("service", Fail, "recorded binary %s is missing; run quacktel service install again", recorded)
+		return check("service", Fail, "recorded binary %s is missing; run %s", recorded, fix)
 	}
 
 	var warning string
 	if resolved, err := filepath.EvalSymlinks(recorded); err == nil && cfg.Exe != "" {
 		if want, err := filepath.EvalSymlinks(cfg.Exe); err == nil && resolved != want {
-			warning = fmt.Sprintf("agent runs %s but this is %s; run quacktel service install to update it", resolved, want)
+			warning = fmt.Sprintf("%s runs %s but this is %s", label, resolved, want)
+			if label == cfg.Label {
+				warning += "; run quacktel service install to update it"
+			}
 		}
 	}
 
 	if cfg.Launchctl != nil {
 		// Status reads the plist from Home, so derive it from the plist's own location.
-		home := filepath.Dir(filepath.Dir(filepath.Dir(cfg.PlistPath)))
-		m := &service.Manager{Label: cfg.Label, Home: home, UID: os.Getuid(), Run: cfg.Launchctl}
+		home := filepath.Dir(filepath.Dir(filepath.Dir(plistPath)))
+		m := &service.Manager{Label: label, Home: home, UID: os.Getuid(), Run: cfg.Launchctl}
 		st, err := m.Status(ctx)
 		switch {
 		case err != nil:
 			return check("service", Fail, "%v", err)
 		case !st.Loaded:
-			return check("service", Fail, "%s is installed but not loaded; run quacktel service install", cfg.Label)
+			return check("service", Fail, "%s is installed but not loaded; run %s", label, fix)
 		case st.State != "running":
-			return check("service", Fail, "%s is loaded but %s", cfg.Label, st.State)
+			return check("service", Fail, "%s is loaded but %s", label, st.State)
 		}
 	}
 	if warning != "" {
 		return check("service", Warn, "%s", warning)
 	}
 
-	return check("service", OK, "%s running %s", cfg.Label, recorded)
+	return check("service", OK, "%s running %s", label, recorded)
 }
 
 type stats struct {

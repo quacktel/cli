@@ -188,6 +188,32 @@ func TestDoctorService(t *testing.T) {
 	require.Contains(t, c.Detail, "missing")
 }
 
+func TestDoctorBrewService(t *testing.T) {
+	exe, err := os.Executable()
+	require.NoError(t, err)
+	exe, err = filepath.EvalSymlinks(exe)
+	require.NoError(t, err)
+
+	brewPlist := installPlist(t, service.BrewLabel, []string{exe, "serve", "--auth"})
+	ownPlist := filepath.Join(filepath.Dir(brewPlist), "dev.quacktel.test.plist")
+	cfg := Config{PlistPath: ownPlist, Label: "dev.quacktel.test", Exe: exe, Launchctl: fake(running, nil)}
+	c := checkService(t.Context(), cfg)
+	require.Equal(t, OK, c.Status)
+	require.Contains(t, c.Detail, service.BrewLabel)
+
+	cfg.Launchctl = fake("Could not find service", errors.New("exit status 113"))
+	c = checkService(t.Context(), cfg)
+	require.Equal(t, Fail, c.Status)
+	require.Contains(t, c.Detail, "brew services restart quacktel")
+
+	data, err := service.Render(service.Plist{Label: cfg.Label, ProgramArguments: []string{exe, "serve"}, LogPath: "/dev/null"})
+	require.NoError(t, err)
+	write(t, ownPlist, string(data), 0o644)
+	c = checkService(t.Context(), cfg)
+	require.Equal(t, Warn, c.Status)
+	require.Contains(t, c.Detail, "only one serve")
+}
+
 func TestDoctorStatsAndDisk(t *testing.T) {
 	dir := newDir(t)
 	cfg := Config{DataDir: dir, MaxDisk: 1000}

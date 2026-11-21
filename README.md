@@ -144,8 +144,7 @@ to remove it.
 
 Homebrew users can run `brew services start quacktel` instead. Use one or the
 other, not both: only one receiver can hold the data dir. Under `brew services`,
-logs go to `$(brew --prefix)/var/log/quacktel.log`, and `quacktel doctor`
-doesn't yet recognise the service.
+logs go to `$(brew --prefix)/var/log/quacktel.log`.
 
 To run the receiver in the foreground instead, use `quacktel serve`. Add
 `--auth` if anything outside your shell will send to it.

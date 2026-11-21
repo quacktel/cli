@@ -143,5 +143,25 @@ func executablePath() (string, error) {
 		return "", fmt.Errorf("failed to resolve the quacktel binary: %w", err)
 	}
 
-	return exe, nil
+	return brewStablePath(exe), nil
+}
+
+// brewStablePath swaps a Homebrew Cellar path for its opt symlink, because brew upgrade deletes the versioned Cellar dir.
+func brewStablePath(exe string) string {
+	sep := string(filepath.Separator)
+	prefix, rest, ok := strings.Cut(exe, sep+"Cellar"+sep)
+	if !ok {
+		return exe
+	}
+	// rest is <formula>/<version>/<path in keg>.
+	parts := strings.SplitN(rest, sep, 3)
+	if len(parts) != 3 {
+		return exe
+	}
+	stable := filepath.Join(prefix, "opt", parts[0], parts[2])
+	if r, err := filepath.EvalSymlinks(stable); err != nil || r != exe {
+		return exe
+	}
+
+	return stable
 }
