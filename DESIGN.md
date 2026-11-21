@@ -1,6 +1,6 @@
 # quacktel design
 
-Status: v0.1.0 released · M6 in progress · 2026-11-22
+Status: v0.1.0 released · v0.2.0-rc.3 cut from the release pipeline · 2026-11-22
 
 ## Summary
 
@@ -57,7 +57,7 @@ quacktel version
 | Redaction | Key-pattern masking, on by default; extra patterns come with `config.toml` (deferred) | Cheap and predictable. |
 | Retention | 30 days or 10 GB, whichever is hit first | Enough history for agents to analyse usage and cost trends. |
 | Onboarding | Docs plus `quacktel env` | Nothing writes to another tool's config. |
-| Distribution | `go install`, Homebrew tap formula, or `install.sh` (SHA-256 checked). M6 adds SBOMs, immutable releases and attestations; M7 adds .deb/.rpm | One native CGO build per target, published as one release. See [Distribution](#distribution). |
+| Distribution | `go install`, Homebrew tap formula, or `install.sh`. Immutable GitHub releases with SBOMs and keyless SLSA provenance from a tag-only Buildkite pipeline. Notarisation deferred past 1.0; .deb/.rpm in M7 | One native CGO build per target, published as one release. See [Distribution](#distribution). |
 
 ## Architecture
 
@@ -620,45 +620,38 @@ WHERE attrs['ocsf.class_uid'] = '4001';
 
 ## Distribution
 
-**Current (v0.1.0):** CI is Buildkite (`.buildkite/pipeline.yml`). Every build
-lints and tests on the default (Linux) queue, and runs a goreleaser snapshot build natively on
-macOS arm64, Linux amd64 and Linux arm64 agents to prove the CGO link. From
-source, `mise run install` (`go install ./cmd/quacktel` into `~/.local/bin`)
-needs only the Xcode command-line tools: `duckdb-go` ships prebuilt static
-DuckDB libraries.
+**CI** is Buildkite. `quacktel-cli` (`.buildkite/pipeline.yml`) lints and tests
+on the default Linux amd64 queue and runs a goreleaser snapshot build natively
+on macOS arm64, Linux amd64 and Linux arm64, to prove the CGO link. DuckDB
+needs CGO, so every target is built natively; there's no cross-compiling.
+From source, `mise run install` needs only the Xcode command-line tools,
+because `duckdb-go` ships prebuilt static DuckDB libraries.
 
-**Release process (M6, from v0.2.0):** releases run on a separate Buildkite
-pipeline, `quacktel-cli-release` (`.buildkite/pipeline.release.yml`), which
-builds only `v*` tags and never branches or pull requests. Push a tag on `main`
-to release.
+**Releases** run on a separate pipeline, `quacktel-cli-release`
+(`.buildkite/pipeline.release.yml`), which builds only `vX.Y.Z[-pre]` tags and
+never branches or pull requests. Pushing a tag on `main` releases it.
 
-1. **Build:** each native agent runs `goreleaser release --skip=publish`
-   (`.buildkite/release-build.sh`). It produces the archive, its `.sha256`
-   (`checksum.split`), an SPDX SBOM (`sboms`, via syft) with its `.sha256`, and
-   on macOS the Homebrew formula. These are uploaded as Buildkite artifacts.
-   Nothing touches GitHub.
-2. **Publish:** one job (`.buildkite/release-publish.sh`) checks the tag is
-   `vX.Y.Z[-pre]` and its commit is on `main`, downloads every artifact, checks
-   all three targets are present and their checksums match, signs provenance
-   (below), then creates the GitHub release with all assets in one `gh release
-   create`. gh uploads to a draft and publishes last, so the release is complete
-   before it becomes immutable. A tag with `-` is marked a prerelease. The job
-   then commits `Formula/quacktel.rb` to the tap through the GitHub contents API.
-3. **Provenance:** the publish job signs a SLSA v1 provenance statement (repo,
-   tag, commit, Buildkite build URL) for each archive with `cosign attest-blob
-   --oidc-provider buildkite-agent`. Signing is keyless: Fulcio issues a
-   short-lived certificate for the job's Buildkite OIDC identity, and the
-   signature is logged in Rekor. The `<archive>.sigstore.json` bundles ship as
-   release assets. The certificate pins issuer `https://agent.buildkite.com` and
-   identity `https://buildkite.com/wolfeidauci/quacktel-cli-release`. The identity
-   names the pipeline, not a branch or tag, which is why releases have their own
-   tag-only pipeline. The statement says what this build published for the tag's
-   commit; the archives are compiled by the separate build jobs.
-4. **Immutable releases** are on: a published release and its tag can't change.
-   The publish job refuses an existing release, so a failed or bad release needs a
-   new tag (iterate on `-rc.N` tags).
+1. **Build** (`release-build.sh`, one job per target): `goreleaser release
+   --skip=publish` makes the archive, `.sha256`, SPDX SBOM (syft) and, on
+   macOS, the Homebrew formula, and uploads them as Buildkite artifacts.
+2. **Publish** (`release-publish.sh`, one job): checks the tag's commit is on
+   `main`, gathers and checksums all three targets, signs provenance, then
+   creates the GitHub release with every asset in one `gh release create` (draft,
+   upload, publish), and updates the tap formula, prereleases included.
+3. **Provenance:** `cosign attest-blob --oidc-provider buildkite-agent` signs a
+   SLSA v1 statement (repo, tag, commit, build URL) per archive, keyless through
+   Fulcio and Rekor. Bundles ship as `<archive>.sigstore.json`. Issuer
+   `https://agent.buildkite.com`, identity
+   `https://buildkite.com/wolfeidauci/quacktel-cli-release`. The identity names
+   only the pipeline, which is why releases have their own tag-only pipeline.
+4. **Immutable releases** are on. The publish job refuses an existing release, so
+   a bad release needs a new tag; iterate on `-rc.N`.
 
-Verify a downloaded archive:
+The `QUACKTEL_GITHUB_TOKEN` cluster secret is scoped to the release pipeline
+with no `build_branch` condition, because tag builds report the tag as their
+branch.
+
+Verify an archive:
 
 ```sh
 gh release verify-asset <tag> quacktel_<os>_<arch>.tar.gz --repo quacktel/cli
@@ -669,55 +662,33 @@ cosign verify-blob-attestation --type slsaprovenance1 \
   quacktel_<os>_<arch>.tar.gz
 ```
 
-**Verified on v0.2.0-rc.2** (signed by the main pipeline, before the split):
-keyless signing works from Buildkite, `cosign verify-blob-attestation` accepts
-the archive and rejects a modified one. `gh attestation verify` does **not**
-work with Buildkite signatures: it requires the GitHub Actions certificate
-extension `SourceRepositoryOwnerURI`, and posting bundles to GitHub's attestation
-API also needs a token permission we don't grant. GitHub's own release
-attestation (immutable releases) works independently of CI, via `gh release
-verify-asset`.
+`install.sh` always checks the SHA-256, adds `gh release verify-asset` when `gh`
+is present and the release is immutable, and the cosign check when `cosign` is
+present and the release has a bundle. A check that runs and fails is fatal.
+It installs to `~/.local/bin` (`--prefix` overrides).
 
-The free goreleaser can't merge builds from separate runners, which is why
-assembly happens in the publish job instead. The formula uses goreleaser's
-deprecated `brews` rather than `homebrew_casks`, because casks get
-`com.apple.quarantine` and can't offer `brew services`. syft reads the Go module
-info in the binary, so the SBOM lists DuckDB as the `duckdb-go` and
-`libduckdb` module versions, not as a separate C++ component.
+**Decisions and findings (M6, v0.2.0-rc.1 to rc.3):**
 
-DuckDB needs CGO, so every target is built natively. There is no cross-compiling.
-
-| Target | Runner | Notes |
-|---|---|---|
-| darwin/arm64 | Buildkite `macos-medium` agent | Ad-hoc signed by the linker (macOS arm64 requires a signature). Not notarised in v0.1; see below. |
-| linux/amd64, linux/arm64 | Buildkite `linux-small` and `linux-arm64-small` agents | Archives ship from v0.1.0 but are untested. M7: build on the oldest supported glibc base image so they run on older distros. |
-
-- **Homebrew (done):** a tap at `quacktel/homebrew-tap` (macOS). The formula
-  includes a `service` block so `brew services` works. The publish job updates it
-  for every release, prereleases included.
-- **Apple notarisation is deferred.** It needs a paid Apple Developer Program
-  membership. v0.1 relies on the fact that Gatekeeper only checks files carrying
-  the `com.apple.quarantine` attribute, which browsers set but Homebrew formula
-  installs and `curl` in `install.sh` do not (confirmed for `install.sh` on
-  v0.1.0). Integrity and
-  provenance come from checksums and GitHub attestations instead. A binary
-  downloaded through a browser needs `xattr -d com.apple.quarantine`, which the
-  docs cover. If you join the programme later, goreleaser can add signing and
-  notarisation (via quill) without changing anything else.
-- **Linux packages (M7):** .deb and .rpm via goreleaser `nfpms`, shipping the
-  systemd user unit.
-- **`install.sh` (in the repo):** detects OS and architecture, downloads the
-  release archive, and verifies it before installing (to `~/.local/bin`, or
-  `--prefix`). It always checks the SHA-256, then adds what the machine supports:
-  1. With `gh` (new enough for `release verify-asset`) and an immutable release
-     (v0.2.0 on), it checks GitHub's release attestation.
-  2. With `cosign` and a release that has a `.sigstore.json` bundle (v0.2.0 on),
-     it verifies the SLSA provenance against the release pipeline's identity.
-  3. Any check that runs and fails is fatal. It prints which checks passed.
-     Making a missing check fatal (`--require-provenance`) is future work.
-- **Supply chain:** pinned DuckDB and `duckdb-go` versions, pinned tool versions
-  in `mise.toml` (including syft, cosign and gh), an SBOM per archive, immutable
-  releases, and keyless SLSA provenance from a tag-only release pipeline.
+- The free goreleaser can't merge per-runner builds, so the publish job
+  assembles the release; this is also what makes immutable releases possible.
+- `gh attestation verify` can't verify Buildkite-signed bundles: it requires the
+  GitHub Actions certificate extension `SourceRepositoryOwnerURI`. cosign is the
+  provenance verifier. GitHub's own release attestation works regardless of CI.
+- The formula uses goreleaser's deprecated `brews`, because casks get
+  `com.apple.quarantine` and can't offer `brew services`.
+- Every build agent generates a formula for its own archive, so only the macOS
+  agent uploads it, and publish refuses a formula that isn't the macOS one for
+  the tag. rc.2 and rc.3 shipped the Linux arm64 formula before this check; the
+  rc.3 tap formula was fixed by hand.
+- The SBOM lists DuckDB by its Go module versions (`duckdb-go`, `libduckdb`),
+  not as a C++ component.
+- **Notarisation is deferred past 1.0.** It needs a paid Apple Developer
+  membership. Gatekeeper only checks files with `com.apple.quarantine`, which
+  Homebrew formula installs and `install.sh` (curl) don't set (confirmed).
+  Browser downloads need `xattr -d com.apple.quarantine`. goreleaser can add
+  signing and notarisation (quill) later without other changes.
+- **Linux (M7):** archives ship but are untested; M7 adds the oldest-glibc
+  build image, .deb/.rpm via `nfpms` and the systemd user unit.
 
 ## Code layout (proposed)
 
@@ -748,26 +719,8 @@ Not reused: Substrait, Participle SQL, and the custom executor.
 | M3 (done) | Compaction + retention (including removal of expired service directories) + size cap | A 24h soak shows a bounded file count, no duplicate rows, and the cap enforced. |
 | M4 (done) | `engine`, `tools`, `mcp`, `query` | All six tools work against fixtures; the SELECT guard rejects the bypass corpus; a scoped session can't read another service's files through `sql`/`read_parquet`. |
 | M5 (done) | `service` (launchd), `doctor` | Install, reboot, data still flowing, on macOS. |
-| M6 (in progress) | Pre-1.0 release: goreleaser, SBOM, immutable one-shot releases, provenance, Homebrew tap, `install.sh`. Done: goreleaser, tap, `install.sh` (checksum), SBOMs, immutable one-shot publish (verified on v0.2.0-rc.1). Provenance via cosign and Buildkite OIDC (verified on v0.2.0-rc.2), and `install.sh` release-attestation and provenance checks. Left: first release from the tag-only pipeline, tap smoke test, notarisation decision | A release binary, installed via the tap formula and via `install.sh` on a clean Mac, runs with no Gatekeeper prompt; its provenance passes `cosign verify-blob-attestation` with the release pipeline identity (`gh attestation verify` can't verify Buildkite signers). Decide on notarisation. |
+| M6 (done) | Pre-1.0 release: goreleaser, SBOMs, immutable one-shot releases, keyless provenance, Homebrew tap, `install.sh` | Verified on v0.2.0-rc.3: `install.sh` installs with checksum, release-attestation and provenance checks; the tap formula installs with no quarantine attribute and passes `brew test`. Notarisation deferred past 1.0. |
 | M7 | Linux amd64/arm64: XDG paths, systemd user unit, .deb/.rpm, `install.sh` Linux support | Native builds on the oldest supported glibc; install, reboot, data still flowing, on Ubuntu and Fedora. |
-
-### Manual soak
-
-M3 exit check, run by hand: run `quacktel serve` for 24h with Claude Code
-telemetry pointed at it, then check:
-
-- Counters in `stats.json` reset when `serve` restarts, so read it before
-  restarting.
-- `stats.json`: `compactions` and `files_retired` are growing, `bytes_on_disk`
-  is under the cap, and `write_errors` is 0.
-- Each closed hour holds exactly one file per (service, signal).
-- `SELECT count(*) FROM logs` is the same before and after a `serve` restart.
-
-### M5 exit check
-
-Run by hand on macOS: `quacktel service install`, reboot, then confirm
-`quacktel doctor` passes and `quacktel query "SELECT count(*) FROM logs"` grows
-after using Claude Code.
 
 ## Risks and open questions
 
@@ -843,7 +796,7 @@ after using Claude Code.
 - **The span promoted-key set** was chosen in M2 from the OpenTelemetry HTTP and GenAI conventions, not from real samples. Revisit it against real agent traces; a change bumps the schema version.
 - **Span attribute keys follow the current semantic conventions only.** Senders on older names (for example `http.method`, `http.status_code`) get no promoted columns; the values stay in `attrs`.
 - **The example module pins OpenTelemetry Go.** `mise run check:tidy` and the e2e build cover it, but bumping the SDK is a manual change.
-- **No notarisation:** browser downloads trigger a Gatekeeper block, and
-  there's no Apple-backed identity on the binary. Mitigations: the Homebrew
-  and `install.sh` paths, plus GitHub attestations. Revisit if users hit this
-  often.
+- **No notarisation (deferred past 1.0):** browser downloads trigger a
+  Gatekeeper block, and there's no Apple-backed identity on the binary.
+  Mitigations: the Homebrew and `install.sh` paths, plus release attestations and
+  provenance. Revisit if users hit this often.
