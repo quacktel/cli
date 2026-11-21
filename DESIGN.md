@@ -390,7 +390,12 @@ reads manifests with Go, and `Open` rejects an unscoped `AllowedDir` outside
 ### MCP tools
 
 `quacktel mcp [--data-dir] [--service] [--no-sql]` serves these read-only tools
-over stdio (every tool is annotated `readOnlyHint`). Stdout carries protocol
+over stdio (every tool is annotated `readOnlyHint` and `openWorldHint: false`).
+The server advertises only the static `tools` capability (no `logging` or
+`listChanged`) and sends concise server `instructions` during initialization
+covering the recommended tool workflow (`list_services` → `describe_schema` →
+typed tools, plus `sql` guidance when enabled and the scoped service name when
+`--service` is set) and the untrusted data warning. Stdout carries protocol
 only; logs go to stderr.
 
 Defaults shared by the typed tools:
