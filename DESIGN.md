@@ -622,7 +622,10 @@ a `main` build with `RELEASE_TAG=<tag>`. The macOS job creates the GitHub
 release and each Linux job appends its archive (`release.mode: append`), because
 the free goreleaser can't merge builds from separate runners. Each archive gets
 its own `.sha256` (`checksum.split`) instead of a shared `checksums.txt`.
-Attestations, SBOMs and the Homebrew tap are not wired up yet. Everything below
+The macOS job also pushes `Formula/quacktel.rb` to the tap. It uses goreleaser's
+deprecated `brews` rather than `homebrew_casks`, because casks get
+`com.apple.quarantine` and can't offer `brew services`. Attestations and SBOMs are
+not wired up yet. Everything below
 is the pre-1.0 release plan (M6/M7).
 
 DuckDB needs CGO, so every target is built natively. There is no cross-compiling.

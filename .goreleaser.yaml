@@ -48,6 +48,29 @@ checksum:
 changelog:
   disable: true
 
+# A formula, not a cask: casks get com.apple.quarantine, which un-notarised binaries can't pass.
+brews:
+  - name: quacktel
+    repository:
+      owner: quacktel
+      name: homebrew-tap
+    directory: Formula
+    homepage: https://github.com/quacktel/cli
+    description: Local OpenTelemetry sink for coding agents, stored as Parquet and queried over MCP
+    license: Apache-2.0
+    # Only the macOS job publishes, so the formula lists just the darwin archive.
+    skip_upload: '{{ ne .Runtime.Goos "darwin" }}'
+    service: |
+      run [opt_bin/"quacktel", "serve", "--auth"]
+      keep_alive true
+      log_path var/"log/quacktel.log"
+      error_log_path var/"log/quacktel.log"
+    caveats: |
+      Run quacktel at login with either `brew services start quacktel` or
+      `quacktel service install`, not both: only one serve can hold the data dir.
+    test: |
+      assert_match version.to_s, shell_output("#{bin}/quacktel version")
+
 release:
   mode: append
   replace_existing_artifacts: true
