@@ -1,0 +1,32 @@
+# Release pipeline: a separate Buildkite pipeline that builds only v* tags, so its OIDC identity
+# (https://buildkite.com/wolfeidauci/quacktel-cli-release) signs release provenance and nothing else.
+steps:
+  # DuckDB needs CGO, so each target builds natively and uploads its archive as a Buildkite artifact.
+  - label: ":goreleaser: release build {{matrix}}"
+    key: release_build
+    agents:
+      queue: "{{matrix}}"
+    matrix:
+      - macos-medium
+      - linux-small
+      - linux-arm64-small
+    retry: &release_retry
+      automatic:
+        # mise-cache exits 75 when GitHub downloads fail.
+        - exit_status: 75
+          limit: 2
+    command: .buildkite/release-build.sh
+    plugins:
+      - ./.buildkite/plugins/mise-cache: ~
+      - ./.buildkite/plugins/go-cache:
+          name: go_build
+
+  # One job signs provenance and creates the GitHub release with every asset, so it is complete before it becomes immutable.
+  - label: ":github: publish release"
+    depends_on: release_build
+    agents:
+      queue: linux-small
+    retry: *release_retry
+    command: .buildkite/release-publish.sh
+    plugins:
+      - ./.buildkite/plugins/mise-cache: ~

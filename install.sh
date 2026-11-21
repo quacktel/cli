@@ -4,6 +4,8 @@
 set -eu
 
 repo="quacktel/cli"
+# The release pipeline's Buildkite OIDC identity; only its tag builds sign provenance.
+signer="https://buildkite.com/wolfeidauci/quacktel-cli-release"
 version="latest"
 prefix="${HOME}/.local"
 
@@ -27,12 +29,16 @@ asset="quacktel_${target}.tar.gz"
 tmp="$(mktemp -d)"
 trap 'rm -rf "${tmp}"' EXIT
 
-# gh works while the repository is private; curl needs it public.
+bundle="${tmp}/${asset}.sigstore.json"
 if command -v gh >/dev/null 2>&1; then
-  tag=""
-  [ "${version}" = "latest" ] || tag="${version}"
-  # shellcheck disable=SC2086 # An empty tag means latest.
-  gh release download ${tag} --repo "${repo}" --dir "${tmp}" --pattern "${asset}" --pattern "${asset}.sha256"
+  if [ "${version}" = "latest" ]; then
+    tag="$(gh release view --repo "${repo}" --json tagName --jq .tagName)"
+  else
+    tag="${version}"
+  fi
+  gh release download "${tag}" --repo "${repo}" --dir "${tmp}" --pattern "${asset}" --pattern "${asset}.sha256"
+  # Releases before v0.2.0 have no provenance bundle.
+  gh release download "${tag}" --repo "${repo}" --dir "${tmp}" --pattern "${asset}.sigstore.json" 2>/dev/null || true
 else
   if [ "${version}" = "latest" ]; then
     base="https://github.com/${repo}/releases/latest/download"
@@ -41,6 +47,7 @@ else
   fi
   curl -fsSL -o "${tmp}/${asset}" "${base}/${asset}"
   curl -fsSL -o "${tmp}/${asset}.sha256" "${base}/${asset}.sha256"
+  curl -fsSL -o "${bundle}" "${base}/${asset}.sigstore.json" 2>/dev/null || rm -f "${bundle}"
 fi
 
 expected="$(cut -d' ' -f1 <"${tmp}/${asset}.sha256")"
@@ -53,7 +60,29 @@ if [ "${expected}" != "${actual}" ]; then
   echo "checksum mismatch for ${asset}: expected ${expected}, got ${actual}" >&2
   exit 1
 fi
-echo "checksum verified; build provenance was not verified" >&2
+verified="checksum"
+
+# GitHub signs immutable releases itself, so this proves the archive was published in that release.
+if command -v gh >/dev/null 2>&1 && gh release verify-asset --help >/dev/null 2>&1 &&
+  [ "$(gh release view "${tag}" --repo "${repo}" --json isImmutable --jq .isImmutable)" = "true" ]; then
+  if ! gh release verify-asset "${tag}" "${tmp}/${asset}" --repo "${repo}" >/dev/null; then
+    echo "release attestation check failed for ${asset}" >&2
+    exit 1
+  fi
+  verified="${verified}, release attestation"
+fi
+
+# SLSA provenance signed keyless by the release pipeline; see DESIGN.md (Distribution).
+if command -v cosign >/dev/null 2>&1 && [ -f "${bundle}" ]; then
+  if ! cosign verify-blob-attestation --bundle "${bundle}" --type slsaprovenance1 \
+    --certificate-oidc-issuer https://agent.buildkite.com --certificate-identity "${signer}" \
+    "${tmp}/${asset}" >/dev/null 2>&1; then
+    echo "build provenance check failed for ${asset} (expected signer ${signer})" >&2
+    exit 1
+  fi
+  verified="${verified}, build provenance"
+fi
+echo "verified: ${verified}" >&2
 
 tar -xzf "${tmp}/${asset}" -C "${tmp}" quacktel
 mkdir -p "${prefix}/bin"

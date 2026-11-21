@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-tag="${RELEASE_TAG:?RELEASE_TAG must name an existing tag}"
+tag="${BUILDKITE_TAG:?run this from a tag build of the release pipeline}"
 
 # Checkouts don't always fetch tags, and goreleaser refuses a tag that isn't on HEAD.
 git fetch --force origin "refs/tags/${tag}:refs/tags/${tag}"
