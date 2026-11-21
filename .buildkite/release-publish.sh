@@ -49,6 +49,14 @@ for target in "${targets[@]}"; do
   done
 done
 [[ -f "dist/homebrew/${formula}" ]] || { echo "missing dist/homebrew/${formula}" >&2; exit 1; }
+# The tap serves macOS only, so the formula must point at this tag's darwin archive and its checksum.
+darwin="quacktel_darwin_arm64.tar.gz"
+for want in "depends_on :macos" "releases/download/${tag}/${darwin}\"" "sha256 \"$(cat "dist/${darwin}.sha256")\""; do
+  if ! grep -qF -- "${want}" "dist/homebrew/${formula}"; then
+    echo "formula is not the macOS formula for ${tag}: missing ${want}" >&2
+    exit 1
+  fi
+done
 
 # SLSA v1 provenance, signed keyless with this job's Buildkite OIDC identity (Fulcio cert, Rekor entry).
 # It attests that this build of ${commit} published these digests; the archives were compiled by the release_build jobs.

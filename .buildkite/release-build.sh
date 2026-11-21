@@ -10,6 +10,7 @@ git fetch --force origin "refs/tags/${tag}:refs/tags/${tag}"
 GORELEASER_CURRENT_TAG="${tag}" goreleaser release --clean --skip=publish
 
 buildkite-agent artifact upload "dist/quacktel_*.tar.gz*"
-if [[ -f dist/homebrew/Formula/quacktel.rb ]]; then
+# Every agent generates a formula for its own archive; only macOS's is the real one, and artifacts share one path.
+if [[ "$(uname -s)" == "Darwin" ]]; then
   buildkite-agent artifact upload dist/homebrew/Formula/quacktel.rb
 fi
