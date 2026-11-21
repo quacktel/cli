@@ -347,8 +347,8 @@ frees up.
 ## Development
 
 ```sh
-mise exec -- go test -race ./...
-mise exec -- golangci-lint run ./...
+mise run test
+mise run check:lint
 mise run check:tidy
 ```
 

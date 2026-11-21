@@ -21,11 +21,21 @@ steps:
           automatic:
             - exit_status: 75
               limit: 2
-        command: go test -race -count=1 ./...
+        # Same split as mise run test, as go test -json for the annotation; the soak run appends to the same file.
+        commands:
+          - go test -race -count=1 -json -coverprofile=coverage.out -skip '^TestSoakSimulated$' ./... > tests.json
+          - go test -count=1 -json -run '^TestSoakSimulated$' ./internal/store/ >> tests.json
+        artifact_paths:
+          - tests.json
+          - coverage.out
         plugins:
           - ./.buildkite/plugins/mise-cache: ~
           - ./.buildkite/plugins/go-cache:
               name: go_test
+          # v1.0.0, pinned by commit.
+          - wolfeidau/go-test-annotate#4064140be6eb80883def24bfdbf079c2fe0b34a2:
+              file: tests.json
+              tparse-version: v0.18.0
 
   - group: ":package: build"
     key: build
