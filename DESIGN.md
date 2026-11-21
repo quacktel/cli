@@ -621,7 +621,7 @@ WHERE attrs['ocsf.class_uid'] = '4001';
 ## Distribution
 
 **Current (v0.1.0):** CI is Buildkite (`.buildkite/pipeline.yml`). Every build
-lints and tests on macOS arm64, and runs a goreleaser snapshot build natively on
+lints and tests on the default (Linux) queue, and runs a goreleaser snapshot build natively on
 macOS arm64, Linux amd64 and Linux arm64 agents to prove the CGO link. From
 source, `mise run install` (`go install ./cmd/quacktel` into `~/.local/bin`)
 needs only the Xcode command-line tools: `duckdb-go` ships prebuilt static

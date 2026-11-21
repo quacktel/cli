@@ -3,8 +3,6 @@ steps:
     key: quality_checks
     steps:
       - label: ":golangci-lint: lint"
-        agents:
-          queue: macos-medium
         retry:
           automatic:
             # mise-cache exits 75 when GitHub downloads fail.
@@ -19,8 +17,6 @@ steps:
               name: go_lint
 
       - label: ":go: test"
-        agents:
-          queue: macos-medium
         retry:
           automatic:
             - exit_status: 75
