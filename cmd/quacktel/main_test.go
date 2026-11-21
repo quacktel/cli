@@ -66,6 +66,12 @@ func TestVersion(t *testing.T) {
 	require.Regexp(t, `^quacktel \S+ \(commit \S+, go[^)]+\)\n$`, stdout)
 }
 
+func TestVersionFlag(t *testing.T) {
+	stdout, err := runBin(t, "--version")
+	require.NoError(t, err)
+	require.Regexp(t, `^quacktel \S+ \(commit \S+, go[^)]+\)\n$`, stdout)
+}
+
 func TestHelp(t *testing.T) {
 	stdout, err := runBin(t, "--help")
 	require.NoError(t, err)

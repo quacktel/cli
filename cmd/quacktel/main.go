@@ -38,6 +38,8 @@ type Globals struct {
 type cli struct {
 	Globals
 
+	VersionFlag kong.VersionFlag `name:"version" help:"Print version information and exit."`
+
 	Version versionCmd `cmd:"" help:"Print version information."`
 	Serve   serveCmd   `cmd:"" help:"Run the OTLP receiver and write logs to Parquet."`
 	Query   queryCmd   `cmd:"" help:"Run a read-only SQL query over stored telemetry."`
@@ -128,6 +130,7 @@ func kongVars() kong.Vars {
 		"max_disk":      strconv.FormatInt(defaultMaxDisk, 10),
 		"max_inflight":  strconv.Itoa(receiver.DefaultMaxInFlight),
 		"service_label": service.DefaultLabel,
+		"version":       versionString(),
 	}
 }
 
