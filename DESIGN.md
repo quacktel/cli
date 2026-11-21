@@ -641,6 +641,14 @@ with `RELEASE_TAG=<tag>`.
    create`. gh uploads to a draft and publishes last, so the release is complete
    before it becomes immutable. A tag with `-` is marked a prerelease. The job
    then commits `Formula/quacktel.rb` to the tap through the GitHub contents API.
+   **Provenance (spike, from v0.2.0-rc.2):** before creating the release, the
+   publish job signs a SLSA v1 provenance statement for each archive with
+   `cosign attest-blob --oidc-provider buildkite-agent` (keyless: a Fulcio
+   certificate for this job's Buildkite OIDC identity, logged in Rekor). The
+   `<archive>.sigstore.json` bundles ship as release assets and are also posted to
+   GitHub's attestation API, on a best-effort basis, to test `gh attestation
+   verify`. The statement covers what this build published for the tag's commit; the
+   archives themselves are compiled by the separate build jobs.
 3. **Immutable releases:** once the repo setting is on, a published release and
    its tag can't change. The publish job refuses an existing release, so a
    failed or bad release needs a new tag (iterate on `-rc.N` tags).
@@ -650,8 +658,9 @@ assembly happens in the publish job instead. The formula uses goreleaser's
 deprecated `brews` rather than `homebrew_casks`, because casks get
 `com.apple.quarantine` and can't offer `brew services`. syft reads the Go module
 info in the binary, so the SBOM lists DuckDB as the `duckdb-go` and
-`libduckdb` module versions, not as a separate C++ component. Attestations are
-the next step (Sigstore signing in the publish job).
+`libduckdb` module versions, not as a separate C++ component. GitHub's own release attestation (immutable releases) already
+works: `gh release verify-asset <tag> <file>` proves an asset belongs to the
+release, independent of CI.
 
 DuckDB needs CGO, so every target is built natively. There is no cross-compiling.
 
@@ -718,7 +727,7 @@ Not reused: Substrait, Participle SQL, and the custom executor.
 | M3 (done) | Compaction + retention (including removal of expired service directories) + size cap | A 24h soak shows a bounded file count, no duplicate rows, and the cap enforced. |
 | M4 (done) | `engine`, `tools`, `mcp`, `query` | All six tools work against fixtures; the SELECT guard rejects the bypass corpus; a scoped session can't read another service's files through `sql`/`read_parquet`. |
 | M5 (done) | `service` (launchd), `doctor` | Install, reboot, data still flowing, on macOS. |
-| M6 (in progress) | Pre-1.0 release: goreleaser, SBOM, immutable one-shot releases, attestations, Homebrew tap, `install.sh`. Done: goreleaser, tap, `install.sh` (checksum), SBOMs and one-shot publish (pending a v0.2.0 rc). Left: enable immutable releases, Sigstore attestations, attestation check in `install.sh`, tap smoke test | A release binary, installed via the tap formula and via `install.sh` on a clean Mac, runs with no Gatekeeper prompt and passes `gh attestation verify`. Decide on notarisation. |
+| M6 (in progress) | Pre-1.0 release: goreleaser, SBOM, immutable one-shot releases, attestations, Homebrew tap, `install.sh`. Done: goreleaser, tap, `install.sh` (checksum), SBOMs, immutable one-shot publish (verified on v0.2.0-rc.1). Left: Sigstore provenance (spike in progress), attestation check in `install.sh`, tap smoke test | A release binary, installed via the tap formula and via `install.sh` on a clean Mac, runs with no Gatekeeper prompt and passes `gh attestation verify`. Decide on notarisation. |
 | M7 | Linux amd64/arm64: XDG paths, systemd user unit, .deb/.rpm, `install.sh` Linux support | Native builds on the oldest supported glibc; install, reboot, data still flowing, on Ubuntu and Fedora. |
 
 ### Manual soak
