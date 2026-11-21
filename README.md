@@ -137,12 +137,15 @@ quacktel service install -- --retention 168h --max-disk 5368709120
 ```
 
 Running `service install` again upgrades in place. After upgrading or
-rebuilding the binary, run `quacktel service restart`. Use
+rebuilding the binary, run `quacktel service restart`. `quacktel --version`
+shows which version you have. Use
 `quacktel service status` to see what's running and `quacktel service uninstall`
 to remove it.
 
 Homebrew users can run `brew services start quacktel` instead. Use one or the
-other, not both: only one receiver can hold the data dir.
+other, not both: only one receiver can hold the data dir. Under `brew services`,
+logs go to `$(brew --prefix)/var/log/quacktel.log`, and `quacktel doctor`
+doesn't yet recognise the service.
 
 To run the receiver in the foreground instead, use `quacktel serve`. Add
 `--auth` if anything outside your shell will send to it.
@@ -176,11 +179,13 @@ them into your existing settings while keeping other keys:
 
 ```sh
 quacktel env --claude-code --auth --json
-jq -s '.[0] * .[1]' ~/.claude/settings.json <(quacktel env --claude-code --auth --json) \
-  > /tmp/settings.json && mv /tmp/settings.json ~/.claude/settings.json
+tmp="$(mktemp)"
+jq -s '.[0] * .[1]' ~/.claude/settings.json <(quacktel env --claude-code --auth --json) > "$tmp" \
+  && chmod 600 "$tmp" && mv "$tmp" ~/.claude/settings.json
 ```
 
-The token is a local secret, so keep `settings.json` private.
+The token is a local secret, so keep `settings.json` private (mode `0600`). If
+the file doesn't exist yet, write the `--json` output straight to it.
 
 Claude Code sends its usage data (cost, tokens, tool results, prompts if you
 enable `OTEL_LOG_USER_PROMPTS`) as log events. You'll find them in `logs`, with
@@ -260,11 +265,12 @@ eval "$(quacktel env --auth)"
 ```
 
 Set `service.name` in your app's resource. Each service gets its own directory,
-and `quacktel mcp --service <name>` scopes to it. `examples/otel-go-app` is a
-small Go app that sends a sample trace:
+and `quacktel mcp --service <name>` scopes to it. From a clone of this repo,
+`examples/otel-go-app` is a small Go app that sends a sample trace:
 
 ```sh
-OTEL_EXPORTER_OTLP_ENDPOINT=http://127.0.0.1:4318 go run -C examples/otel-go-app .
+eval "$(quacktel env --auth)"
+go run -C examples/otel-go-app .
 ```
 
 ## Querying
