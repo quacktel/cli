@@ -79,7 +79,9 @@ brew install quacktel/tap/quacktel
 ### Install script
 
 Downloads the release archive for your platform, checks its SHA-256 and installs
-to `~/.local/bin`. Read [install.sh](install.sh) before piping it to a shell.
+to `~/.local/bin`. If `gh` is installed it also checks GitHub's release
+attestation, and if `cosign` is installed it verifies the build provenance (from
+v0.2.0). Read [install.sh](install.sh) before piping it to a shell.
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/quacktel/cli/main/install.sh | sh
