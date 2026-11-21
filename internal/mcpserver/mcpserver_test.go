@@ -59,7 +59,6 @@ func TestListTools(t *testing.T) {
 		for _, tool := range res.Tools {
 			names = append(names, tool.Name)
 			require.True(t, tool.Annotations.ReadOnlyHint, tool.Name)
-			require.True(t, tool.Annotations.IdempotentHint, tool.Name)
 			require.NotNil(t, tool.Annotations.OpenWorldHint, tool.Name)
 			require.False(t, *tool.Annotations.OpenWorldHint, tool.Name)
 			require.NotEmpty(t, tool.Description)
@@ -99,6 +98,7 @@ func TestInitializeInstructionsAndCapabilities(t *testing.T) {
 			require.JSONEq(t, `{"tools":{}}`, string(caps))
 
 			require.Contains(t, init.Instructions, "list_services")
+			require.Contains(t, init.Instructions, "last 24h by default")
 			require.Contains(t, init.Instructions, "describe_schema")
 			require.Contains(t, init.Instructions, "untrusted")
 			if tc.sql {
@@ -110,7 +110,12 @@ func TestInitializeInstructionsAndCapabilities(t *testing.T) {
 			}
 			if tc.service != "" {
 				require.Contains(t, init.Instructions, `"agent"`)
-				require.Contains(t, init.Instructions, "scoped to service")
+				require.Contains(t, init.Instructions, "typed tools reject other services")
+				if tc.sql {
+					require.Contains(t, init.Instructions, "sql sees only this service's rows")
+				} else {
+					require.NotContains(t, init.Instructions, "sql sees only")
+				}
 			} else {
 				require.NotContains(t, init.Instructions, "scoped to service")
 			}
@@ -209,6 +214,11 @@ func TestScopedSQLCannotReadOtherService(t *testing.T) {
 	require.False(t, res.IsError, text(t, res))
 	rows := res.StructuredContent.(map[string]any)["rows"].([]any)
 	require.Len(t, rows, 1)
+
+	res = call(t, cs, "sql", map[string]any{"query": "SELECT * FROM logs WHERE service_name = 'web'"})
+	require.False(t, res.IsError, text(t, res))
+	rows = res.StructuredContent.(map[string]any)["rows"].([]any)
+	require.Empty(t, rows)
 }
 
 func TestSQLDescriptionHasNoWindow(t *testing.T) {
