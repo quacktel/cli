@@ -1,17 +1,15 @@
 # quacktel
 
-An agent-first, local [OpenTelemetry](https://opentelemetry.io) sink for local
-development and coding agents. `quacktel` receives OTLP logs and traces on
-`127.0.0.1`, stores them as [Apache Parquet](https://parquet.apache.org) on
-your machine, and lets agents query them over the
-[Model Context Protocol (MCP)](https://modelcontextprotocol.io). Telemetry never
-leaves the machine.
+An agent-first [OpenTelemetry](https://opentelemetry.io) backend for local
+development and coding agents. quacktel receives OTLP logs and traces on
+`127.0.0.1` so agents can check that the software they're building actually
+works before it's released. Telemetry never leaves the machine.
 
-It lets agents check that the software they're building actually works before
-it's released. Storage is written with [Apache Arrow](https://arrow.apache.org)
-and queried with [DuckDB](https://duckdb.org). It works with
-[Claude Code](https://claude.ai/code) and any app instrumented with an
-OpenTelemetry SDK.
+Incoming telemetry streams through [Apache Arrow](https://arrow.apache.org) into
+compacted [Apache Parquet](https://parquet.apache.org) files and is queried by
+a statically linked [DuckDB](https://duckdb.org) engine over the
+[Model Context Protocol (MCP)](https://modelcontextprotocol.io). It works with
+any app instrumented with an OpenTelemetry SDK.
 
 ## Contents
 
@@ -20,8 +18,8 @@ OpenTelemetry SDK.
 - [Quickstart](#quickstart)
 - [Running in the background](#running-in-the-background)
 - [Claude Code](#claude-code)
-- [OpenShell](#openshell)
 - [Your own apps](#your-own-apps)
+- [OpenShell](#openshell)
 - [Querying](#querying)
 - [Storage locations](#storage-locations)
 - [Security notes](#security-notes)
@@ -31,58 +29,44 @@ OpenTelemetry SDK.
 
 ## About
 
-Coding agents can write and test code, but passing tests don't show what the
-software does when it runs: which requests it makes, where it's slow, what it
-logs when something goes wrong. That's what telemetry is for, and agents rarely
-get to see it during development.
+Passing tests don't show what your software does when it runs: which requests
+it makes, where it's slow, or what it logs when something fails. quacktel gives
+coding agents that runtime view locally. Point your app's OpenTelemetry SDK at
+`127.0.0.1:4318`, run it, and let the agent inspect the resulting traces and
+logs before you ship. The same store also captures coding-agent telemetry
+(cost, tokens, tool calls) and [NVIDIA OpenShell](https://www.nvidia.com/en-us/ai/openshell/)
+sandbox events.
 
-quacktel gives them that view, locally. Point your app's OpenTelemetry SDK at
-quacktel, run it, and the agent queries the resulting logs and traces to confirm
-the change behaves as intended: the expected spans are there, nothing errored,
-latency hasn't regressed. The same store holds the agent's own telemetry, so
-you can see what a coding session cost and where its time went.
+> Status: pre-1.0. Supported on macOS (Apple Silicon). Linux release archives
+> are published but untested, and the background service is macOS only; full
+> Linux support is planned.
 
-**Agent-first.** MCP is the primary interface, not an add-on. The tools are
-read-only, keep results within an agent's context budget, and label telemetry
-as untrusted data. The typed tools bind every value as a parameter, and raw SQL
-can be switched off with `--no-sql`. The CLI
-(`query`, `doctor`) is there for humans and scripts.
+### How it works
 
-Use it to:
+```text
+App / Agent (OTLP/HTTP)
+  → quacktel serve       redact → Apache Arrow → compacted Parquet + manifests
+  → quacktel mcp / query locked-down DuckDB over committed views
+  → Coding agent         typed, context-budgeted MCP tools + read-only SQL
+```
 
-- **validate changes locally**: let an agent run your app and check its traces
-  and logs for errors, missing calls and slow paths before you ship;
-- **observe coding agents**: cost, tokens, tool calls and failures across Claude
-  Code sessions;
-- **collect sandbox events**: [NVIDIA OpenShell](https://www.nvidia.com/en-us/ai/openshell/) sandbox network events
-  (see [OpenShell](#openshell)).
+The write path and query engine stay decoupled. `quacktel serve` decodes
+OTLP/HTTP logs and traces (protobuf or JSON, with gzip; metrics return `200`
+and are dropped), redacts secret-looking attribute keys, and writes compacted
+Parquet files via Apache Arrow with zero database lock contention. Each
+`quacktel mcp` or `quacktel query` invocation opens an in-memory, statically
+linked DuckDB directly over the committed Parquet manifests, giving you
+read-only SQL over `logs` and `spans` with no separate database or runtime
+extensions.
 
-> **Status:** pre-1.0. Supported on macOS on Apple silicon. Linux release
-> archives are published but untested, and the background service is macOS
-> only; full Linux support is planned.
+### Built for agents
 
-### Features
-
-- **MCP server for agents**: `quacktel mcp` exposes six read-only tools:
-  `list_services`, `describe_schema`, `search_logs`, `find_spans`, `get_trace`
-  and `sql`. Sessions can be scoped to one service.
-- **OTLP/HTTP receiver**: logs and traces, protobuf or JSON, gzip. Metrics are
-  accepted and dropped.
-- **Locked down by default**: listens on loopback only, rejects browser requests
-  (`Origin`) and DNS-rebinding `Host` headers, caps body size and in-flight
-  requests, and can require a bearer token (`--auth`).
-- **Redaction before storage**: values of secret-looking attribute keys
-  (`authorization`, `cookie`, `*_token`, `password`, `api_key`, …) are replaced
-  with `[REDACTED]`. Token *counts* such as `input_tokens` are kept. Log bodies
-  aren't scanned.
-- **Parquet storage**: per-service directories, compacted into hourly files, with
-  30-day retention and a 10 GiB disk cap by default.
-- **SQL over your telemetry**: `quacktel query` runs read-only DuckDB SQL over
-  `logs` and `spans` views.
-- **Background service**: `quacktel service install` runs the receiver as a
-  per-user launchd agent that survives logout and reboot.
-- **Health checks**: `quacktel doctor` checks the receiver, the service, the
-  data dir and the read path.
+MCP is the primary interface, not an add-on. `quacktel mcp` exposes six
+read-only tools (`list_services`, `describe_schema`, `search_logs`,
+`find_spans`, `get_trace` and `sql`) designed around an agent's loop: results
+stay within a context budget, telemetry is labelled as untrusted data, typed
+tools bind every value as a parameter, and sessions can be scoped to a single
+service or locked down with `--no-sql`.
 
 ## Install
 
@@ -107,7 +91,7 @@ Pass options after `sh -s --`, for example `sh -s -- --version v0.1.0`, or
 
 ### From source
 
-You need the Xcode command-line tools, for cgo, and
+You need the Xcode Command Line Tools (for cgo) and
 [mise](https://mise.jdx.dev), which pins Go and the other tools.
 
 ```sh
@@ -126,7 +110,8 @@ quacktel service install    # runs quacktel serve --auth under launchd
 quacktel doctor             # every check should be ok
 ```
 
-Send Claude Code's telemetry to it, for the current shell:
+Claude Code is the fastest way to see live data. Point its telemetry at
+quacktel for the current shell:
 
 ```sh
 eval "$(quacktel env --claude-code --auth)"
@@ -146,8 +131,10 @@ today?"* or *"which tools failed most this week?"*. You can also query directly:
 quacktel query "SELECT event_name, count(*) FROM logs GROUP BY 1 ORDER BY 2 DESC"
 ```
 
-To make the telemetry settings permanent, see
+To make Claude Code's telemetry settings permanent, see
 [Send Claude Code's telemetry to quacktel](#send-claude-codes-telemetry-to-quacktel).
+To send traces and logs from your own services so an agent can verify them, see
+[Your own apps](#your-own-apps).
 
 ## Running in the background
 
@@ -170,7 +157,8 @@ other, not both: only one receiver can hold the data dir. Under `brew services`,
 logs go to `$(brew --prefix)/var/log/quacktel.log`.
 
 To run the receiver in the foreground instead, use `quacktel serve`. Add
-`--auth` if anything outside your shell will send to it.
+`--auth` to require a bearer token (recommended so other local processes can't
+write freely, and enabled automatically with `--unsafe-bind`).
 
 ## Claude Code
 
@@ -231,8 +219,9 @@ quacktel env --mcp
 Then ask things like *"what did my API requests cost today?"* or *"show the
 slowest spans from my app in the last hour"*.
 
-- The tools default to the last 24 hours and 100 rows (max 500), and cut long
-  strings at 2,000 characters.
+- Typed tools default to the last 24 hours and 100 rows (20 for `search_logs`,
+  max 500). Responses are capped at 40,000 JSON characters to fit within an
+  agent's context budget, and long strings are cut at 2,000 characters.
 - Every result is labelled as untrusted data. Telemetry is written by local
   processes, and agents shouldn't follow instructions found in it.
 - `quacktel mcp --service <name>` limits a session to one service's data, and
@@ -242,11 +231,30 @@ slowest spans from my app in the last hour"*.
   is on the server's stderr: check Claude Code's MCP logs or run
   `claude --debug`.
 
+## Your own apps
+
+Point any OpenTelemetry SDK at quacktel with the same variables, without
+`--claude-code`:
+
+```sh
+eval "$(quacktel env --auth)"
+```
+
+Set `service.name` in your app's resource. Each service gets its own directory,
+and `quacktel mcp --service <name>` scopes to it. From a clone of this repo,
+`examples/otel-go-app` is a small Go app that sends a sample trace:
+
+```sh
+eval "$(quacktel env --auth)"
+go run -C examples/otel-go-app .
+```
+
 ## OpenShell
 
-The [OpenShell](https://www.nvidia.com/en-us/ai/openshell/) gateway can export sandbox network events (OCSF) as OTLP logs.
-With quacktel running with `--auth` (the default for `service install`), add
-this to the gateway's `gateway.toml`:
+The [OpenShell](https://www.nvidia.com/en-us/ai/openshell/) gateway and
+supervisor can export sandbox OCSF events (network, auth and state changes) as
+OTLP logs. With quacktel running with `--auth` (the default for
+`service install`), add this to the gateway's `gateway.toml`:
 
 ```toml
 [openshell.gateway.otlp.ocsf]
@@ -269,30 +277,17 @@ headers_file = "/Users/<you>/Library/Application Support/quacktel/otlp-headers"
 
 ```sql
 SELECT DISTINCT attrs['ocsf.metadata.uid'] AS uid,
-       json_extract_string(body, '$.action') AS action,
-       json_extract_string(body, '$.dst_endpoint.hostname') AS host,
+       json_extract_string(body, '$.activity_name') AS activity,
+       coalesce(
+         json_extract_string(body, '$.dst_endpoint.hostname'),
+         json_extract_string(body, '$.dst_endpoint.domain'),
+         json_extract_string(body, '$.dst_endpoint.ip')
+       ) AS host,
+       json_extract_string(body, '$.dst_endpoint.port') AS port,
        coalesce(attrs['openshell.sandbox.id'], resource_attrs['openshell.sandbox.id']) AS sandbox
 FROM logs
 WHERE attrs['ocsf.class_uid'] = '4001'
 ORDER BY uid;
-```
-
-## Your own apps
-
-Point any OpenTelemetry SDK at quacktel with the same variables, without
-`--claude-code`:
-
-```sh
-eval "$(quacktel env --auth)"
-```
-
-Set `service.name` in your app's resource. Each service gets its own directory,
-and `quacktel mcp --service <name>` scopes to it. From a clone of this repo,
-`examples/otel-go-app` is a small Go app that sends a sample trace:
-
-```sh
-eval "$(quacktel env --auth)"
-go run -C examples/otel-go-app .
 ```
 
 ## Querying
@@ -327,18 +322,23 @@ quacktel query --service claude-code "SELECT sum(CAST(attrs['cost_usd'] AS DOUBL
 | LaunchAgent | `~/Library/LaunchAgents/dev.quacktel.serve.plist` |
 
 Partitions use the time quacktel received the data (UTC), not the record's
-timestamp. Old hours are deleted whole by retention or the disk cap; the current
-hour is never deleted. If the current hour alone exceeds the disk cap, new
-writes are refused with 429 until space frees up.
+timestamp. Old hours are deleted whole by retention (30 days by default) or the
+disk cap (10 GiB by default); the current hour is never deleted. If the current
+hour alone exceeds the disk cap, new writes are refused with 429 until space
+frees up.
 
 ## Security notes
 
 - The receiver only listens on loopback unless you pass `--unsafe-bind`, which
-  also turns on `--auth`.
+  also turns on `--auth`. It rejects browser `Origin` and DNS-rebinding `Host`
+  headers and caps request body size and in-flight requests.
 - Any local process can send telemetry and pick its own `service.name`. Treat
   stored content, and anything an agent reads from it, as untrusted.
-- Redaction only looks at attribute keys. Log bodies (Claude Code prompts if you
-  enable them, OCSF command lines) are stored as received.
+- Redaction runs before storage and replaces values of secret-looking attribute
+  keys (`authorization`, `cookie`, `*_token`, `password`, `api_key`, …) with
+  `[REDACTED]` while keeping token counts such as `input_tokens`. Log bodies
+  (Claude Code prompts if you enable them, OCSF command lines) are stored as
+  received.
 - `quacktel env --auth` prints the token on purpose. Don't paste its output
   anywhere public.
 
