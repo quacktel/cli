@@ -56,7 +56,7 @@ brews:
       name: homebrew-tap
     directory: Formula
     homepage: https://github.com/quacktel/cli
-    description: Local OpenTelemetry sink for coding agents, stored as Parquet and queried over MCP
+    description: Local OpenTelemetry sink for coding agents, stored as Parquet, queried via MCP
     license: Apache-2.0
     # Only the macOS job publishes, so the formula lists just the darwin archive.
     skip_upload: '{{ ne .Runtime.Goos "darwin" }}'
