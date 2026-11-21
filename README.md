@@ -4,13 +4,41 @@ A local OpenTelemetry sink for coding agents. `quacktel` receives OTLP logs and
 traces on `127.0.0.1`, stores them as Parquet on your machine, and lets agents
 query them over MCP. Telemetry never leaves the machine.
 
-Use it to let Claude Code analyse its own sessions (cost, tokens, tool use), to
-debug the apps you're building from their logs and traces, or as a sink for
-[OpenShell](#openshell) sandbox network events.
+## Contents
 
-> Status: pre-1.0, macOS on Apple silicon only. Linux support is planned.
+- [About](#about)
+- [Install](#install)
+- [Quickstart](#quickstart)
+- [Running in the background](#running-in-the-background)
+- [Claude Code](#claude-code)
+- [OpenShell](#openshell)
+- [Your own apps](#your-own-apps)
+- [Querying](#querying)
+- [Storage locations](#storage-locations)
+- [Security notes](#security-notes)
+- [Development](#development)
+- [Built with AI](#built-with-ai)
+- [License](#license)
 
-## Features
+## About
+
+Coding agents like Claude Code already emit OpenTelemetry: cost, tokens, tool
+calls and, if you opt in, prompts. Most of the time that data goes nowhere, or
+to a hosted backend you'd rather not send your prompts and file paths to.
+quacktel keeps it on your machine, in plain Parquet files, and hands it back to
+the agent through MCP so it can answer questions about its own sessions.
+
+Use it to:
+
+- let Claude Code analyse its own sessions: cost, tokens, slow tools, errors;
+- debug the apps you're building from their logs and traces;
+- collect [OpenShell](#openshell) sandbox network events.
+
+> **Status:** pre-1.0. Supported on macOS on Apple silicon. Linux release
+> archives are published but untested, and the background service is macOS
+> only; full Linux support is planned.
+
+### Features
 
 - **OTLP/HTTP receiver**: logs and traces, protobuf or JSON, gzip. Metrics are
   accepted and dropped.
@@ -35,7 +63,28 @@ debug the apps you're building from their logs and traces, or as a sink for
 
 ## Install
 
-Build from source. You need the Xcode command-line tools, for cgo, and
+### Homebrew
+
+```sh
+brew install quacktel/tap/quacktel
+```
+
+### Install script
+
+Downloads the release archive for your platform, checks its SHA-256 and installs
+to `~/.local/bin`. Read [install.sh](install.sh) before piping it to a shell.
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/quacktel/cli/main/install.sh | sh
+```
+
+Pass options after `sh -s --`, for example `sh -s -- --version v0.1.0`, or
+`--prefix DIR` to install to `DIR/bin`. Make sure that directory is on your
+`PATH`.
+
+### From source
+
+You need the Xcode command-line tools, for cgo, and
 [mise](https://mise.jdx.dev), which pins Go and the other tools.
 
 ```sh
@@ -45,14 +94,39 @@ mise install
 mise run install        # installs to ~/.local/bin/quacktel
 ```
 
-Make sure `~/.local/bin` is on your `PATH`.
+## Quickstart
 
-## Quick start
+Start the receiver in the background and check it's healthy:
 
 ```sh
-quacktel service install    # start the receiver in the background (with --auth)
+quacktel service install    # runs quacktel serve --auth under launchd
 quacktel doctor             # every check should be ok
 ```
+
+Send Claude Code's telemetry to it, for the current shell:
+
+```sh
+eval "$(quacktel env --claude-code --auth)"
+```
+
+Give Claude Code the MCP tools, then start a session:
+
+```sh
+claude mcp add quacktel -- "$(command -v quacktel)" mcp
+claude
+```
+
+Use Claude Code for a while, then ask it *"what did my API requests cost
+today?"* or *"which tools failed most this week?"*. You can also query directly:
+
+```sh
+quacktel query "SELECT event_name, count(*) FROM logs GROUP BY 1 ORDER BY 2 DESC"
+```
+
+To make the telemetry settings permanent, see
+[Send Claude Code's telemetry to quacktel](#send-claude-codes-telemetry-to-quacktel).
+
+## Running in the background
 
 `service install` runs `quacktel serve --auth` under launchd. To change the
 receiver's settings, pass `serve` flags after `--`. They're validated before
@@ -62,9 +136,13 @@ anything is written:
 quacktel service install -- --retention 168h --max-disk 5368709120
 ```
 
-Running `service install` again upgrades in place. After rebuilding the binary,
-run `quacktel service restart`. Use `quacktel service status` to see what's
-running and `quacktel service uninstall` to remove it.
+Running `service install` again upgrades in place. After upgrading or
+rebuilding the binary, run `quacktel service restart`. Use
+`quacktel service status` to see what's running and `quacktel service uninstall`
+to remove it.
+
+Homebrew users can run `brew services start quacktel` instead. Use one or the
+other, not both: only one receiver can hold the data dir.
 
 To run the receiver in the foreground instead, use `quacktel serve`. Add
 `--auth` if anything outside your shell will send to it.
@@ -210,7 +288,7 @@ quacktel query --service claude-code "SELECT sum(CAST(attrs['cost_usd'] AS DOUBL
 
 | What | Where |
 |---|---|
-| Binary | `~/.local/bin/quacktel` |
+| Binary | `~/.local/bin/quacktel` (install script, source) or `$(brew --prefix)/bin/quacktel` |
 | Data dir | `~/Library/Application Support/quacktel/` (mode `0700`; override with `--data-dir`) |
 | Telemetry | `<data dir>/services/<service>-<hash>/{logs,spans}/date=YYYY-MM-DD/hour=HH/*.parquet` |
 | Per-service file index | `<data dir>/services/<service>-<hash>/manifest.json` |

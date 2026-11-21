@@ -11,7 +11,7 @@ while [ $# -gt 0 ]; do
   case "$1" in
     --version) version="$2"; shift 2 ;;
     --prefix) prefix="$2"; shift 2 ;;
-    -h | --help) sed -n '2,3p' "$0"; exit 0 ;;
+    -h | --help) echo "usage: install.sh [--version vX.Y.Z] [--prefix DIR]"; exit 0 ;;
     *) echo "unknown argument: $1" >&2; exit 1 ;;
   esac
 done
