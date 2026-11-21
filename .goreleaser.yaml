@@ -41,9 +41,13 @@ archives:
     # No version in the name, so install.sh can use releases/latest/download.
     name_template: "{{ .ProjectName }}_{{ .Os }}_{{ .Arch }}"
 
-# One .sha256 per archive, because each runner publishes separately and a shared checksums.txt would be overwritten.
+# One .sha256 per archive, because each runner builds separately and the files are only gathered at publish.
 checksum:
   split: true
+
+# syft reads the Go module info in the binary; DuckDB appears as the duckdb-go bindings version.
+sboms:
+  - artifacts: archive
 
 changelog:
   disable: true
@@ -70,8 +74,3 @@ brews:
       `quacktel service install`, not both: only one serve can hold the data dir.
     test: |
       assert_match version.to_s, shell_output("#{bin}/quacktel version")
-
-release:
-  mode: append
-  replace_existing_artifacts: true
-  prerelease: auto
