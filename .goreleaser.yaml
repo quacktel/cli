@@ -3,27 +3,52 @@ version: 2
 
 project_name: quacktel
 
+# DuckDB needs CGO, so each runner builds only its own target and appends it to the shared release.
 builds:
-  - id: quacktel
-    main: ./cmd/quacktel
-    binary: quacktel
-    # DuckDB needs CGO, so each target is built natively on its own runner.
-    env:
+  - id: darwin_arm64
+    skip: '{{ not (and (eq .Runtime.Goos "darwin") (eq .Runtime.Goarch "arm64")) }}'
+    goos: [darwin]
+    goarch: [arm64]
+    main: &main ./cmd/quacktel
+    binary: &binary quacktel
+    env: &env
       - CGO_ENABLED=1
-    flags:
+    flags: &flags
       - -trimpath
-    ldflags:
+    ldflags: &ldflags
       - -s -w -X main.version={{.Version}} -X main.commit={{.Commit}} -X main.date={{.Date}}
-    targets:
-      - darwin_arm64
-      - linux_amd64
-      - linux_arm64
+  - id: linux_amd64
+    skip: '{{ not (and (eq .Runtime.Goos "linux") (eq .Runtime.Goarch "amd64")) }}'
+    goos: [linux]
+    goarch: [amd64]
+    main: *main
+    binary: *binary
+    env: *env
+    flags: *flags
+    ldflags: *ldflags
+  - id: linux_arm64
+    skip: '{{ not (and (eq .Runtime.Goos "linux") (eq .Runtime.Goarch "arm64")) }}'
+    goos: [linux]
+    goarch: [arm64]
+    main: *main
+    binary: *binary
+    env: *env
+    flags: *flags
+    ldflags: *ldflags
 
 archives:
   - formats: [tar.gz]
+    # No version in the name, so install.sh can use releases/latest/download.
+    name_template: "{{ .ProjectName }}_{{ .Os }}_{{ .Arch }}"
 
+# One .sha256 per archive, because each runner publishes separately and a shared checksums.txt would be overwritten.
 checksum:
-  name_template: checksums.txt
+  split: true
 
 changelog:
   disable: true
+
+release:
+  mode: append
+  replace_existing_artifacts: true
+  prerelease: auto

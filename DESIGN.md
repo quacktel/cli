@@ -617,8 +617,13 @@ Xcode command-line tools for CGO: `duckdb-go` ships prebuilt static DuckDB
 libraries, so DuckDB isn't compiled locally. CI lints and tests on a macOS
 arm64 runner, runs a goreleaser snapshot build (`goreleaser build --snapshot
 --single-target`) natively on macOS arm64, Linux amd64 and Linux arm64 runners
-to prove the CGO link early, and doesn't publish anything. Everything below is
-the pre-1.0 release plan (M6/M7).
+to prove the CGO link early. Releases are being iterated: push a tag, then run
+a `main` build with `RELEASE_TAG=<tag>`. The macOS job creates the GitHub
+release and each Linux job appends its archive (`release.mode: append`), because
+the free goreleaser can't merge builds from separate runners. Each archive gets
+its own `.sha256` (`checksum.split`) instead of a shared `checksums.txt`.
+Attestations, SBOMs and the Homebrew tap are not wired up yet. Everything below
+is the pre-1.0 release plan (M6/M7).
 
 DuckDB needs CGO, so every target is built natively. There is no cross-compiling.
 
@@ -645,7 +650,7 @@ DuckDB needs CGO, so every target is built natively. There is no cross-compiling
      `gh attestation verify <archive> --repo quacktel/cli` (build provenance from
      `actions/attest-build-provenance`). If the release is immutable,
      `gh release verify-asset` also applies.
-  2. Otherwise, fall back to checking the SHA-256 against `checksums.txt`, and
+  2. Otherwise, fall back to checking the SHA-256 against the archive's `.sha256` file, and
      print that provenance was not verified (`--require-attestation` makes this
      fatal).
   3. Install to `~/.local/bin` by default (no sudo); `--prefix` overrides.

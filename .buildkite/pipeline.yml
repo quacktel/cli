@@ -45,8 +45,39 @@ steps:
           automatic:
             - exit_status: 75
               limit: 2
-        command: goreleaser build --snapshot --single-target --clean
+        command: goreleaser release --snapshot --clean
         plugins:
           - ./.buildkite/plugins/mise-cache: ~
           - ./.buildkite/plugins/go-cache:
               name: go_build
+
+  # Iterating: push a tag, then start a main build with RELEASE_TAG=<tag>. Re-runs replace the release's assets.
+  - group: ":rocket: release"
+    key: release
+    if: build.env("RELEASE_TAG") != null
+    depends_on: [quality_checks, build]
+    steps:
+      - label: ":goreleaser: release macos-medium"
+        key: release_darwin
+        agents:
+          queue: macos-medium
+        retry: &release_retry
+          automatic:
+            - exit_status: 75
+              limit: 2
+        command: .buildkite/release.sh
+        plugins: &release_plugins
+          - ./.buildkite/plugins/mise-cache: ~
+          - ./.buildkite/plugins/go-cache:
+              name: go_build
+      # Waits for macOS so only one job creates the GitHub release; the rest append to it.
+      - label: ":goreleaser: release {{matrix}}"
+        depends_on: release_darwin
+        agents:
+          queue: "{{matrix}}"
+        matrix:
+          - linux-small
+          - linux-arm64-small
+        retry: *release_retry
+        command: .buildkite/release.sh
+        plugins: *release_plugins
