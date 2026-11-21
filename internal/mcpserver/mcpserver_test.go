@@ -59,9 +59,11 @@ func TestListTools(t *testing.T) {
 		for _, tool := range res.Tools {
 			names = append(names, tool.Name)
 			require.True(t, tool.Annotations.ReadOnlyHint, tool.Name)
+			require.True(t, tool.Annotations.IdempotentHint, tool.Name)
 			require.NotNil(t, tool.Annotations.OpenWorldHint, tool.Name)
 			require.False(t, *tool.Annotations.OpenWorldHint, tool.Name)
 			require.NotEmpty(t, tool.Description)
+			require.Contains(t, tool.Description, "untrusted", tool.Name)
 			if tool.Name == "get_trace" {
 				schema, err := json.Marshal(tool.InputSchema)
 				require.NoError(t, err)
@@ -71,6 +73,48 @@ func TestListTools(t *testing.T) {
 		}
 		require.Contains(t, names, "get_trace")
 		require.Equal(t, sql, slices.Contains(names, "sql"))
+	}
+}
+
+func TestInitializeInstructionsAndCapabilities(t *testing.T) {
+	dir := toolstest.Fixture(t)
+	tests := []struct {
+		name    string
+		service string
+		sql     bool
+	}{
+		{"unscoped_sql", "", true},
+		{"unscoped_no_sql", "", false},
+		{"scoped_sql", "agent", true},
+		{"scoped_no_sql", "agent", false},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			cs := connect(t, dir, tc.service, tc.sql)
+			init := cs.InitializeResult()
+			require.NotNil(t, init)
+
+			caps, err := json.Marshal(init.Capabilities)
+			require.NoError(t, err)
+			require.JSONEq(t, `{"tools":{}}`, string(caps))
+
+			require.Contains(t, init.Instructions, "list_services")
+			require.Contains(t, init.Instructions, "describe_schema")
+			require.Contains(t, init.Instructions, "untrusted")
+			if tc.sql {
+				require.Contains(t, init.Instructions, "use sql")
+				require.Contains(t, init.Instructions, "read_parquet")
+			} else {
+				require.NotContains(t, init.Instructions, "use sql")
+				require.NotContains(t, init.Instructions, "read_parquet")
+			}
+			if tc.service != "" {
+				require.Contains(t, init.Instructions, `"agent"`)
+				require.Contains(t, init.Instructions, "scoped to service")
+			} else {
+				require.NotContains(t, init.Instructions, "scoped to service")
+			}
+		})
 	}
 }
 
