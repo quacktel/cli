@@ -1,6 +1,6 @@
 # quacktel design
 
-Status: draft v0.1 design · 2026-11-20
+Status: v0.1.0 released · M6 in progress · 2026-11-22
 
 ## Summary
 
@@ -57,7 +57,7 @@ quacktel version
 | Redaction | Key-pattern masking, on by default; extra patterns come with `config.toml` (deferred) | Cheap and predictable. |
 | Retention | 30 days or 10 GB, whichever is hit first | Enough history for agents to analyse usage and cost trends. |
 | Onboarding | Docs plus `quacktel env` | Nothing writes to another tool's config. |
-| Distribution | Until 1.0: build from source (`go install`). Pre-1.0 release (M6): Homebrew and `install.sh` with attestation check; .deb/.rpm with Linux (M7) | Personal use until 1.0, so no release pipeline yet. | See [Distribution](#distribution). |
+| Distribution | `go install`, Homebrew tap formula, or `install.sh` (SHA-256 checked). M6 adds SBOMs, immutable releases and attestations; M7 adds .deb/.rpm | One native CGO build per target, published as one release. See [Distribution](#distribution). |
 
 ## Architecture
 
@@ -620,36 +620,54 @@ WHERE attrs['ocsf.class_uid'] = '4001';
 
 ## Distribution
 
-**Until 1.0 (personal use):** build and install from source with
-`go install ./cmd/quacktel`, wrapped as a mise task. The only requirement is the
-Xcode command-line tools for CGO: `duckdb-go` ships prebuilt static DuckDB
-libraries, so DuckDB isn't compiled locally. CI lints and tests on a macOS
-arm64 runner, runs a goreleaser snapshot build (`goreleaser build --snapshot
---single-target`) natively on macOS arm64, Linux amd64 and Linux arm64 runners
-to prove the CGO link early. Releases are being iterated: push a tag, then run
-a `main` build with `RELEASE_TAG=<tag>`. The macOS job creates the GitHub
-release and each Linux job appends its archive (`release.mode: append`), because
-the free goreleaser can't merge builds from separate runners. Each archive gets
-its own `.sha256` (`checksum.split`) instead of a shared `checksums.txt`.
-The macOS job also pushes `Formula/quacktel.rb` to the tap. It uses goreleaser's
+**Current (v0.1.0):** CI is Buildkite (`.buildkite/pipeline.yml`). Every build
+lints and tests on the default (Linux) queue, and runs a goreleaser snapshot build natively on
+macOS arm64, Linux amd64 and Linux arm64 agents to prove the CGO link. From
+source, `mise run install` (`go install ./cmd/quacktel` into `~/.local/bin`)
+needs only the Xcode command-line tools: `duckdb-go` ships prebuilt static
+DuckDB libraries.
+
+**Release process (M6, from v0.2.0):** push a tag, then start a `main` build
+with `RELEASE_TAG=<tag>`.
+
+1. **Build:** each native agent runs `goreleaser release --skip=publish`
+   (`.buildkite/release-build.sh`). It produces the archive, its `.sha256`
+   (`checksum.split`), an SPDX SBOM (`sboms`, via syft) with its `.sha256`, and
+   on macOS the Homebrew formula. These are uploaded as Buildkite artifacts.
+   Nothing touches GitHub.
+2. **Publish:** one job (`.buildkite/release-publish.sh`) downloads every
+   artifact, checks that all three targets are present and their checksums
+   match, then creates the GitHub release with all assets in one `gh release
+   create`. gh uploads to a draft and publishes last, so the release is complete
+   before it becomes immutable. A tag with `-` is marked a prerelease. The job
+   then commits `Formula/quacktel.rb` to the tap through the GitHub contents API.
+3. **Immutable releases:** once the repo setting is on, a published release and
+   its tag can't change. The publish job refuses an existing release, so a
+   failed or bad release needs a new tag (iterate on `-rc.N` tags).
+
+The free goreleaser can't merge builds from separate runners, which is why
+assembly happens in the publish job instead. The formula uses goreleaser's
 deprecated `brews` rather than `homebrew_casks`, because casks get
-`com.apple.quarantine` and can't offer `brew services`. Attestations and SBOMs are
-not wired up yet. Everything below
-is the pre-1.0 release plan (M6/M7).
+`com.apple.quarantine` and can't offer `brew services`. syft reads the Go module
+info in the binary, so the SBOM lists DuckDB as the `duckdb-go` and
+`libduckdb` module versions, not as a separate C++ component. Attestations are
+the next step (Sigstore signing in the publish job).
 
 DuckDB needs CGO, so every target is built natively. There is no cross-compiling.
 
 | Target | Runner | Notes |
 |---|---|---|
-| darwin/arm64 | macOS arm64 runner | Ad-hoc signed by the linker (macOS arm64 requires a signature). Not notarised in v0.1; see below. |
-| linux/amd64, linux/arm64 (M7) | Native Linux runners (e.g. `ubuntu-24.04-arm`) | Built on the oldest supported glibc base image so it runs on older distros. |
+| darwin/arm64 | Buildkite `macos-medium` agent | Ad-hoc signed by the linker (macOS arm64 requires a signature). Not notarised in v0.1; see below. |
+| linux/amd64, linux/arm64 | Buildkite `linux-small` and `linux-arm64-small` agents | Archives ship from v0.1.0 but are untested. M7: build on the oldest supported glibc base image so they run on older distros. |
 
-- **Homebrew:** a tap at `quacktel/homebrew-tap` (macOS). The formula includes a
-  `service` block so `brew services` works.
+- **Homebrew (done):** a tap at `quacktel/homebrew-tap` (macOS). The formula
+  includes a `service` block so `brew services` works. The publish job updates it
+  for every release, prereleases included.
 - **Apple notarisation is deferred.** It needs a paid Apple Developer Program
   membership. v0.1 relies on the fact that Gatekeeper only checks files carrying
   the `com.apple.quarantine` attribute, which browsers set but Homebrew formula
-  installs and `curl` in `install.sh` do not (verify in M6). Integrity and
+  installs and `curl` in `install.sh` do not (confirmed for `install.sh` on
+  v0.1.0). Integrity and
   provenance come from checksums and GitHub attestations instead. A binary
   downloaded through a browser needs `xattr -d com.apple.quarantine`, which the
   docs cover. If you join the programme later, goreleaser can add signing and
@@ -657,18 +675,19 @@ DuckDB needs CGO, so every target is built natively. There is no cross-compiling
 - **Linux packages (M7):** .deb and .rpm via goreleaser `nfpms`, shipping the
   systemd user unit.
 - **`install.sh` (in the repo):** detects OS and architecture, downloads the
-  release archive, and verifies it before installing:
+  release archive, and verifies it before installing. Today it does step 2
+  only; step 1 lands with attestations:
   1. If `gh` is present, run
-     `gh attestation verify <archive> --repo quacktel/cli` (build provenance from
-     `actions/attest-build-provenance`). If the release is immutable,
+     `gh attestation verify <archive> --repo quacktel/cli` (Sigstore build
+     provenance from the publish job). Because releases are immutable,
      `gh release verify-asset` also applies.
   2. Otherwise, fall back to checking the SHA-256 against the archive's `.sha256` file, and
      print that provenance was not verified (`--require-attestation` makes this
      fatal).
   3. Install to `~/.local/bin` by default (no sudo); `--prefix` overrides.
-- **Supply chain:** pinned DuckDB and `duckdb-go` versions, an SBOM per artifact
-  (goreleaser `sboms`), build-provenance attestations, immutable releases, and
-  pinned tool versions in `mise.toml` and CI.
+- **Supply chain:** pinned DuckDB and `duckdb-go` versions, pinned tool versions
+  in `mise.toml` (including syft and gh), an SBOM per archive, immutable
+  releases, and (next) build-provenance attestations.
 
 ## Code layout (proposed)
 
@@ -693,13 +712,13 @@ Not reused: Substrait, Participle SQL, and the custom executor.
 
 | | Scope | Exit criteria |
 |---|---|---|
-| M0 | Repo scaffold, Kong CLI skeleton, CI (lint + test on macOS arm64), DuckDB static-link spike | `go install ./cmd/quacktel` on a Mac gives a binary that runs `SELECT 42` through DuckDB, with no runtime extension downloads; hardening settings verified by tests. |
-| M1 | Receiver + redaction + logs writer + per-service layout + manifest | Claude Code logs land in Parquet; hostile `service.name` values (traversal, unicode, overflow past the cap) are handled; the hardening tests pass (Origin, Host, Content-Type, caps, 429). |
+| M0 (done) | Repo scaffold, Kong CLI skeleton, CI (lint + test on macOS arm64), DuckDB static-link spike | `go install ./cmd/quacktel` on a Mac gives a binary that runs `SELECT 42` through DuckDB, with no runtime extension downloads; hardening settings verified by tests. |
+| M1 (done) | Receiver + redaction + logs writer + per-service layout + manifest | Claude Code logs land in Parquet; hostile `service.name` values (traversal, unicode, overflow past the cap) are handled; the hardening tests pass (Origin, Host, Content-Type, caps, 429). |
 | M2 (done) | Spans writer | A Go/Node sample app's traces land and can be queried. |
 | M3 (done) | Compaction + retention (including removal of expired service directories) + size cap | A 24h soak shows a bounded file count, no duplicate rows, and the cap enforced. |
 | M4 (done) | `engine`, `tools`, `mcp`, `query` | All six tools work against fixtures; the SELECT guard rejects the bypass corpus; a scoped session can't read another service's files through `sql`/`read_parquet`. |
 | M5 (done) | `service` (launchd), `doctor` | Install, reboot, data still flowing, on macOS. |
-| M6 | Pre-1.0 release: goreleaser, GitHub attestations, SBOM, Homebrew tap, `install.sh` | A release binary, installed via the tap formula and via `install.sh` on a clean Mac, runs with no Gatekeeper prompt and passes `gh attestation verify`. Decide on notarisation. |
+| M6 (in progress) | Pre-1.0 release: goreleaser, SBOM, immutable one-shot releases, attestations, Homebrew tap, `install.sh`. Done: goreleaser, tap, `install.sh` (checksum), SBOMs and one-shot publish (pending a v0.2.0 rc). Left: enable immutable releases, Sigstore attestations, attestation check in `install.sh`, tap smoke test | A release binary, installed via the tap formula and via `install.sh` on a clean Mac, runs with no Gatekeeper prompt and passes `gh attestation verify`. Decide on notarisation. |
 | M7 | Linux amd64/arm64: XDG paths, systemd user unit, .deb/.rpm, `install.sh` Linux support | Native builds on the oldest supported glibc; install, reboot, data still flowing, on Ubuntu and Fedora. |
 
 ### Manual soak
@@ -724,8 +743,9 @@ after using Claude Code.
 
 - **launchd domain:** the agent loads into `gui/<uid>`, which needs a login
   session. A headless `user/<uid>` mode is future work.
-- **`brew services`** arrives in M6; until then `service install` is the only
-  way to run at login.
+- **Two ways to run at login:** `brew services` and `service install` both
+  work; running both makes the second `serve` fail on the flock. `doctor` warns
+  when both are installed.
 - **Doctor counters reset on restart:** `stats` and `disk` reflect only the
   current `serve` process.
 
@@ -758,10 +778,11 @@ after using Claude Code.
   the window rather than raise limits.
 - **DuckDB hardening semantics vary by version.** They are verified in M0 and
   covered by tests that must fail if a setting stops taking effect.
-- **Release problems surface late:** no release pipeline until M6. This is low risk with a single target built natively; M0 still proves the static DuckDB link.
-- **CGO release cost:** one native build in M6. M7 adds two
-  Linux builds and the choice of oldest supported glibc. M0 de-risks the macOS
-  path before any feature work.
+- **Releases can't be fixed in place:** with immutable releases, a bad release
+  needs a new tag. Iterate on `-rc.N` prereleases first. The tap formula is
+  updated for prereleases too, so a broken rc reaches `brew upgrade` users.
+- **CGO release cost:** three native builds per release. M7 adds the choice of
+  oldest supported glibc.
 - **Binary size** is 121 MB unstripped and 90 MB with `-ldflags='-s -w'` (darwin/arm64, measured in M1; M0 was 79 MB and 62 MB); acceptable.
 - **The open hour holds at most `SealMinFiles` sealed files plus the tails
   flushed since the last pass** per (service, signal). With defaults that is

@@ -240,18 +240,21 @@ func TestPublishFailureRetry(t *testing.T) {
 
 	appendFlush(t, s, "svc", baseTime, 1)
 	svcDir := filepath.Join(dataDir, "services", ServiceDir("svc"))
-	// A read-only service dir makes the manifest rename fail while the partition dir stays writable.
-	require.NoError(t, os.Chmod(svcDir, 0o500))
-	t.Cleanup(func() { require.NoError(t, os.Chmod(svcDir, 0o700)) })
+	manifestPath := filepath.Join(svcDir, "manifest.json")
+	saved := filepath.Join(t.TempDir(), "manifest.json")
+	require.NoError(t, os.Rename(manifestPath, saved))
+	// A non-empty directory in the manifest's place makes its rename fail, even as root (CI agents).
+	require.NoError(t, os.MkdirAll(filepath.Join(manifestPath, "block"), 0o700))
 
 	_, _, err := s.AppendLogs(t.Context(), seqLogs("svc", baseTime, 2))
 	require.NoError(t, err)
 	require.Error(t, s.Maintain(t.Context()))
-	require.Len(t, readManifest(t, dataDir, "svc").Files, 1)
 	require.Len(t, parquetFiles(t, dataDir), 2)
 	require.Zero(t, s.Stats().PendingBatches)
 
-	require.NoError(t, os.Chmod(svcDir, 0o700))
+	require.NoError(t, os.RemoveAll(manifestPath))
+	require.NoError(t, os.Rename(saved, manifestPath))
+	require.Len(t, readManifest(t, dataDir, "svc").Files, 1)
 	require.NoError(t, s.Maintain(t.Context()))
 	require.Len(t, readManifest(t, dataDir, "svc").Files, 2)
 	e := spansEngine(t, dataDir)

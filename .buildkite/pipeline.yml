@@ -3,8 +3,6 @@ steps:
     key: quality_checks
     steps:
       - label: ":golangci-lint: lint"
-        agents:
-          queue: macos-medium
         retry:
           automatic:
             # mise-cache exits 75 when GitHub downloads fail.
@@ -19,8 +17,6 @@ steps:
               name: go_lint
 
       - label: ":go: test"
-        agents:
-          queue: macos-medium
         retry:
           automatic:
             - exit_status: 75
@@ -51,33 +47,36 @@ steps:
           - ./.buildkite/plugins/go-cache:
               name: go_build
 
-  # Iterating: push a tag, then start a main build with RELEASE_TAG=<tag>. Re-runs replace the release's assets.
+  # Push a tag, then start a main build with RELEASE_TAG=<tag>. Releases are immutable, so a failed publish needs a new tag.
   - group: ":rocket: release"
     key: release
     if: build.env("RELEASE_TAG") != null
     depends_on: [quality_checks, build]
     steps:
-      - label: ":goreleaser: release macos-medium"
-        key: release_darwin
+      # DuckDB needs CGO, so each target builds natively and uploads its archive as a Buildkite artifact.
+      - label: ":goreleaser: release build {{matrix}}"
+        key: release_build
         agents:
-          queue: macos-medium
+          queue: "{{matrix}}"
+        matrix:
+          - macos-medium
+          - linux-small
+          - linux-arm64-small
         retry: &release_retry
           automatic:
             - exit_status: 75
               limit: 2
-        command: .buildkite/release.sh
-        plugins: &release_plugins
+        command: .buildkite/release-build.sh
+        plugins:
           - ./.buildkite/plugins/mise-cache: ~
           - ./.buildkite/plugins/go-cache:
               name: go_build
-      # Waits for macOS so only one job creates the GitHub release; the rest append to it.
-      - label: ":goreleaser: release {{matrix}}"
-        depends_on: release_darwin
+      # One job creates the GitHub release with every asset, so it is complete before it becomes immutable.
+      - label: ":github: publish release"
+        depends_on: release_build
         agents:
-          queue: "{{matrix}}"
-        matrix:
-          - linux-small
-          - linux-arm64-small
+          queue: linux-small
         retry: *release_retry
-        command: .buildkite/release.sh
-        plugins: *release_plugins
+        command: .buildkite/release-publish.sh
+        plugins:
+          - ./.buildkite/plugins/mise-cache: ~
