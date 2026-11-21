@@ -21,7 +21,7 @@ steps:
           automatic:
             - exit_status: 75
               limit: 2
-        command: go test -race -count=1 ./...
+        command: mise run test
         plugins:
           - ./.buildkite/plugins/mise-cache: ~
           - ./.buildkite/plugins/go-cache:

@@ -22,7 +22,11 @@ run = ["golangci-lint run --timeout 3m", "shellcheck install.sh .buildkite/relea
 run = ["go fix ./...", "golangci-lint fmt", "golangci-lint run --fix"]
 
 [tasks.test]
-run = "go test -race -count=1 ./..."
+# The soak test runs ~120 sequential maintenance passes; -race makes it ~10x slower and adds nothing.
+run = [
+  "go test -race -count=1 -skip '^TestSoakSimulated$' ./...",
+  "go test -count=1 -run '^TestSoakSimulated$' ./internal/store/",
+]
 
 [tasks.install]
 # A stable path outside mise's per-Go-version dir, because the LaunchAgent records the binary's absolute path.
