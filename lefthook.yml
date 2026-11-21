@@ -6,3 +6,6 @@ pre-commit:
     lint:
       glob: "*.go"
       run: mise run check:lint
+    shellcheck:
+      glob: "{install.sh,.buildkite/**/*.sh,.buildkite/plugins/*/hooks/*}"
+      run: mise exec -- shellcheck {staged_files}

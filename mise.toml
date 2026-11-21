@@ -7,12 +7,13 @@ go = "1.27.4"
 golangci-lint = "2.15.0"
 goreleaser = "2.20.2"
 lefthook = "2.2.2"
+shellcheck = "0.11.0"
 
 [tasks."check:tidy"]
 run = ["go mod tidy -diff", "go -C examples/otel-go-app mod tidy -diff"]
 
 [tasks."check:lint"]
-run = "golangci-lint run --timeout 3m"
+run = ["golangci-lint run --timeout 3m", "shellcheck install.sh .buildkite/release.sh .buildkite/plugins/*/hooks/*"]
 
 [tasks.fix]
 run = ["go fix ./...", "golangci-lint fmt", "golangci-lint run --fix"]
