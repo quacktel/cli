@@ -63,7 +63,7 @@ done
 cat >dist/provenance.json <<JSON
 {
   "buildDefinition": {
-    "buildType": "https://github.com/${repo}/blob/${commit}/.buildkite/pipeline.yml",
+    "buildType": "https://github.com/${repo}/blob/${commit}/.buildkite/pipeline.release.yml",
     "externalParameters": {
       "repository": "https://github.com/${repo}",
       "ref": "refs/tags/${tag}"
