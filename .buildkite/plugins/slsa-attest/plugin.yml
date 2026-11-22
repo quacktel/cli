@@ -1,0 +1,43 @@
+name: SLSA Attest
+description: Verifies Buildkite release artifacts and signs keyless SLSA v1 provenance bundles via Cosign and Buildkite OIDC
+author: https://github.com/wolfeidau
+requirements:
+  - git
+  - cosign
+  - buildkite-agent
+configuration:
+  properties:
+    repo:
+      description: GitHub repository in owner/name format
+      type: string
+    project:
+      description: Release archive filename prefix
+      type: string
+    targets:
+      description: Target platform suffixes (for example darwin_arm64)
+      type: array
+      items:
+        type: string
+    archive-ext:
+      description: Archive filename extension without leading dot
+      type: string
+    dist-dir:
+      description: Directory containing downloaded release artifacts
+      type: string
+    pipeline-file:
+      description: Release pipeline path recorded in SLSA buildDefinition.buildType
+      type: string
+    default-branch:
+      description: Branch checked when require-main is enabled
+      type: string
+    require-main:
+      description: Require the tag commit to be an ancestor of origin/<default-branch>
+      type: boolean
+    sbom:
+      description: Require and verify .sbom.json and .sbom.json.sha256 for each target
+      type: boolean
+  required:
+    - repo
+    - project
+    - targets
+  additionalProperties: false

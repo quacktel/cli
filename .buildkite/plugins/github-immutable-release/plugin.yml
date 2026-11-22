@@ -1,0 +1,47 @@
+name: GitHub Immutable Release
+description: Downloads verified artifacts and provenance bundles and publishes a complete GitHub release in one shot
+author: https://github.com/wolfeidau
+requirements:
+  - git
+  - gh
+  - buildkite-agent
+configuration:
+  properties:
+    repo:
+      description: GitHub repository in owner/name format
+      type: string
+    project:
+      description: Release archive filename prefix
+      type: string
+    targets:
+      description: Target platform suffixes (for example darwin_arm64)
+      type: array
+      items:
+        type: string
+    github-token-secret:
+      description: Buildkite cluster secret name holding the GitHub release token
+      type: string
+    archive-ext:
+      description: Archive filename extension without leading dot
+      type: string
+    dist-dir:
+      description: Directory containing downloaded release artifacts
+      type: string
+    default-branch:
+      description: Branch checked when require-main is enabled
+      type: string
+    require-main:
+      description: Require the tag commit to be an ancestor of origin/<default-branch>
+      type: boolean
+    sbom:
+      description: Require and include .sbom.json and .sbom.json.sha256 for each target
+      type: boolean
+    provenance:
+      description: Require and include .sigstore.json provenance bundle for each target
+      type: boolean
+  required:
+    - repo
+    - project
+    - targets
+    - github-token-secret
+  additionalProperties: false

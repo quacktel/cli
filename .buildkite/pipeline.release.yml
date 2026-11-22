@@ -15,18 +15,65 @@ steps:
         # mise-cache exits 75 when GitHub downloads fail.
         - exit_status: 75
           limit: 2
-    command: .buildkite/release-build.sh
     plugins:
       - ./.buildkite/plugins/mise-cache: ~
       - ./.buildkite/plugins/go-cache:
           name: go_build
+      - ./.buildkite/plugins/goreleaser-build:
+          artifacts:
+            - "dist/quacktel_*.tar.gz*"
+          darwin-artifacts:
+            - dist/homebrew/Formula/quacktel.rb
 
-  # One job signs provenance and creates the GitHub release with every asset, so it is complete before it becomes immutable.
-  - label: ":github: publish release"
+  # Signs keyless SLSA v1 provenance via Buildkite OIDC with no GitHub token access.
+  - label: ":lock: attest provenance"
+    key: slsa_attest
     depends_on: release_build
     agents:
       queue: linux-small
     retry: *release_retry
-    command: .buildkite/release-publish.sh
     plugins:
       - ./.buildkite/plugins/mise-cache: ~
+      - ./.buildkite/plugins/slsa-attest:
+          repo: quacktel/cli
+          project: quacktel
+          targets:
+            - darwin_arm64
+            - linux_amd64
+            - linux_arm64
+
+  # Creates the GitHub release with every asset in one shot, so it is complete before becoming immutable.
+  - label: ":github: publish release"
+    key: publish_release
+    depends_on: slsa_attest
+    agents:
+      queue: linux-small
+    retry: *release_retry
+    plugins:
+      - ./.buildkite/plugins/mise-cache: ~
+      - ./.buildkite/plugins/github-immutable-release:
+          repo: quacktel/cli
+          project: quacktel
+          targets:
+            - darwin_arm64
+            - linux_amd64
+            - linux_arm64
+          github-token-secret: QUACKTEL_GITHUB_TOKEN
+
+  # Validates the macOS formula on every tag and pushes it to the tap on stable releases only.
+  - label: ":beer: update homebrew tap"
+    key: update_homebrew_tap
+    depends_on: publish_release
+    agents:
+      queue: linux-small
+    retry: *release_retry
+    plugins:
+      - ./.buildkite/plugins/mise-cache: ~
+      - ./.buildkite/plugins/homebrew-tap:
+          tap: quacktel/homebrew-tap
+          formula-path: Formula/quacktel.rb
+          artifact-path: dist/homebrew/Formula/quacktel.rb
+          archive: quacktel_darwin_arm64.tar.gz
+          checksum-artifact: dist/quacktel_darwin_arm64.tar.gz.sha256
+          github-token-secret: QUACKTEL_GITHUB_TOKEN
+          skip-prerelease: true

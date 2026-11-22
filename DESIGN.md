@@ -631,20 +631,26 @@ because `duckdb-go` ships prebuilt static DuckDB libraries.
 (`.buildkite/pipeline.release.yml`), which builds only `vX.Y.Z[-pre]` tags and
 never branches or pull requests. Pushing a tag on `main` releases it.
 
-1. **Build** (`release-build.sh`, one job per target): `goreleaser release
+1. **Build** (`goreleaser-build` plugin, one job per target): `goreleaser release
    --skip=publish` makes the archive, `.sha256`, SPDX SBOM (syft) and, on
    macOS, the Homebrew formula, and uploads them as Buildkite artifacts.
-2. **Publish** (`release-publish.sh`, one job): checks the tag's commit is on
-   `main`, gathers and checksums all three targets, signs provenance, then
-   creates the GitHub release with every asset in one `gh release create` (draft,
-   upload, publish), and updates the tap formula, prereleases included.
-3. **Provenance:** `cosign attest-blob --oidc-provider buildkite-agent` signs a
-   SLSA v1 statement (repo, tag, commit, build URL) per archive, keyless through
-   Fulcio and Rekor. Bundles ship as `<archive>.sigstore.json`. Issuer
-   `https://agent.buildkite.com`, identity
+2. **Attest** (`slsa-attest` plugin, one job, no GitHub token): checks the tag
+   is valid semver on `main`, gathers and checksums all three targets, then
+   signs a SLSA v1 statement (repo, tag, commit, release pipeline path, build
+   URL) per archive via `cosign attest-blob --oidc-provider buildkite-agent`,
+   keyless through Fulcio and Rekor, and uploads `<archive>.sigstore.json` as
+   Buildkite artifacts. Issuer `https://agent.buildkite.com`, identity
    `https://buildkite.com/wolfeidauci/quacktel-cli-release`. The identity names
    only the pipeline, which is why releases have their own tag-only pipeline.
-4. **Immutable releases** are on. The publish job refuses an existing release, so
+3. **Publish** (`github-immutable-release` plugin, one job): checks the tag's
+   commit is on `main`, refuses an existing release, re-verifies every archive
+   and SBOM checksum, and creates the GitHub release with every asset in one
+   `gh release create` (draft, upload, publish).
+4. **Homebrew tap** (`homebrew-tap` plugin, one job): downloads and validates
+   the macOS formula (`depends_on :macos`, tag URL, darwin SHA-256) on every
+   tag; pushes to `quacktel/homebrew-tap` on stable tags and skips the push on
+   `-rc.N` prereleases (`skip-prerelease: true`).
+5. **Immutable releases** are on. The publish job refuses an existing release, so
    a bad release needs a new tag; iterate on `-rc.N`.
 
 The `QUACKTEL_GITHUB_TOKEN` cluster secret is scoped to the release pipeline
@@ -762,13 +768,13 @@ Not reused: Substrait, Participle SQL, and the custom executor.
 - **DuckDB hardening semantics vary by version.** They are verified in M0 and
   covered by tests that must fail if a setting stops taking effect.
 - **Provenance trusts the release pipeline:** anyone who can edit
-  `pipeline.release.yml` or the release scripts on `main`, or push a `v*` tag on
-  `main`, can produce signed provenance. Its claims (tag, commit) are made by the
-  signer. Builds don't rerun tests; the tag's commit must be on `main`, which CI
-  gates.
+  `pipeline.release.yml` or the local release plugins on `main`, or push a `v*`
+  tag on `main`, can produce signed provenance. Its claims (tag, commit) are
+  made by the signer. Builds don't rerun tests; the tag's commit must be on
+  `main`, which CI gates.
 - **Releases can't be fixed in place:** with immutable releases, a bad release
-  needs a new tag. Iterate on `-rc.N` prereleases first. The tap formula is
-  updated for prereleases too, so a broken rc reaches `brew upgrade` users.
+  needs a new tag. Iterate on `-rc.N` prereleases first; the `homebrew-tap`
+  plugin validates the formula on prereleases but skips pushing to the tap.
 - **CGO release cost:** three native builds per release. M7 adds the choice of
   oldest supported glibc.
 - **Binary size** is 121 MB unstripped and 90 MB with `-ldflags='-s -w'` (darwin/arm64, measured in M1; M0 was 79 MB and 62 MB); acceptable.
