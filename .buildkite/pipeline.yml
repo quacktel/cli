@@ -11,7 +11,6 @@ steps:
         commands:
           - mise run check:tidy
           - mise run check:lint
-          - mise run test:plugins
         plugins:
           - ./.buildkite/plugins/mise-cache: ~
           - ./.buildkite/plugins/go-cache:

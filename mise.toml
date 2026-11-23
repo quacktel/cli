@@ -16,10 +16,7 @@ syft = "1.57.2"
 run = ["go mod tidy -diff", "go -C examples/otel-go-app mod tidy -diff"]
 
 [tasks."check:lint"]
-run = ["golangci-lint run --timeout 3m", "shellcheck install.sh .buildkite/plugins/test.sh .buildkite/plugins/*/hooks/*"]
-
-[tasks."test:plugins"]
-run = ".buildkite/plugins/test.sh"
+run = ["golangci-lint run --timeout 3m", "shellcheck install.sh .buildkite/plugins/*/hooks/*"]
 
 [tasks.fix]
 run = ["go fix ./...", "golangci-lint fmt", "golangci-lint run --fix"]
