@@ -1,5 +1,5 @@
 name: Homebrew Tap
-description: Validates a generated Homebrew formula against the release archive checksum and updates the tap repository
+description: Validates a generated macOS Homebrew formula against the release archive checksum and updates the tap repository
 author: https://github.com/wolfeidau
 requirements:
   - gh
@@ -8,10 +8,10 @@ requirements:
 configuration:
   properties:
     tap:
-      description: Homebrew tap repository in owner/name format
+      description: Homebrew tap repository in owner/name format (required when verify-only is false)
       type: string
     formula-path:
-      description: Path to the formula file in the tap repository
+      description: Path to the formula file in the tap repository (required when verify-only is false)
       type: string
     artifact-path:
       description: Buildkite artifact path for the generated formula
@@ -23,19 +23,16 @@ configuration:
       description: Buildkite artifact path for the archive SHA-256 file
       type: string
     github-token-secret:
-      description: Buildkite cluster secret name holding the GitHub token for the tap repository
+      description: Buildkite cluster secret name holding the GitHub token for the tap repository (required when verify-only is false)
       type: string
-    macos-only:
-      description: Assert that the formula declares depends_on :macos
+    verify-only:
+      description: Only validate the formula against the archive checksum without pushing to the tap
       type: boolean
     skip-prerelease:
       description: Validate the formula but skip pushing to the tap for prerelease tags
       type: boolean
   required:
-    - tap
-    - formula-path
     - artifact-path
     - archive
     - checksum-artifact
-    - github-token-secret
   additionalProperties: false

@@ -2,13 +2,10 @@
 set -euo pipefail
 
 tag="${BUILDKITE_TAG:?run this from a tag build of the release pipeline}"
-tap="${BUILDKITE_PLUGIN_HOMEBREW_TAP_TAP:?homebrew-tap: tap configuration is required}"
-formula_path="${BUILDKITE_PLUGIN_HOMEBREW_TAP_FORMULA_PATH:?homebrew-tap: formula-path configuration is required}"
 artifact_path="${BUILDKITE_PLUGIN_HOMEBREW_TAP_ARTIFACT_PATH:?homebrew-tap: artifact-path configuration is required}"
 archive="${BUILDKITE_PLUGIN_HOMEBREW_TAP_ARCHIVE:?homebrew-tap: archive configuration is required}"
 checksum_artifact="${BUILDKITE_PLUGIN_HOMEBREW_TAP_CHECKSUM_ARTIFACT:?homebrew-tap: checksum-artifact configuration is required}"
-secret_name="${BUILDKITE_PLUGIN_HOMEBREW_TAP_GITHUB_TOKEN_SECRET:?homebrew-tap: github-token-secret configuration is required}"
-macos_only="${BUILDKITE_PLUGIN_HOMEBREW_TAP_MACOS_ONLY:-true}"
+verify_only="${BUILDKITE_PLUGIN_HOMEBREW_TAP_VERIFY_ONLY:-false}"
 skip_prerelease="${BUILDKITE_PLUGIN_HOMEBREW_TAP_SKIP_PRERELEASE:-true}"
 
 if [[ ! "${tag}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.]+)?$ ]]; then
@@ -22,21 +19,26 @@ buildkite-agent artifact download "${checksum_artifact}" .
 [[ -f "${artifact_path}" ]] || { echo "missing ${artifact_path}" >&2; exit 1; }
 [[ -f "${checksum_artifact}" ]] || { echo "missing ${checksum_artifact}" >&2; exit 1; }
 
-checks=("releases/download/${tag}/${archive}\"" "sha256 \"$(cat "${checksum_artifact}")\"")
-if [[ "${macos_only}" == "true" ]]; then
-  checks=("depends_on :macos" "${checks[@]}")
-fi
-for want in "${checks[@]}"; do
+for want in "depends_on :macos" "releases/download/${tag}/${archive}\"" "sha256 \"$(cat "${checksum_artifact}")\""; do
   if ! grep -qF -- "${want}" "${artifact_path}"; then
     echo "formula is not valid for ${tag}: missing ${want}" >&2
     exit 1
   fi
 done
 
+if [[ "${verify_only}" == "true" ]]; then
+  echo "formula validated for ${tag}"
+  exit 0
+fi
+
 if [[ "${skip_prerelease}" == "true" && "${tag}" == *-* ]]; then
   echo "formula validated for prerelease ${tag}; skipping tap update"
   exit 0
 fi
+
+tap="${BUILDKITE_PLUGIN_HOMEBREW_TAP_TAP:?homebrew-tap: tap configuration is required}"
+formula_path="${BUILDKITE_PLUGIN_HOMEBREW_TAP_FORMULA_PATH:?homebrew-tap: formula-path configuration is required}"
+secret_name="${BUILDKITE_PLUGIN_HOMEBREW_TAP_GITHUB_TOKEN_SECRET:?homebrew-tap: github-token-secret configuration is required}"
 
 token="$(buildkite-agent secret get "${secret_name}" 2>/dev/null)" || {
   echo "failed to read the ${secret_name} cluster secret" >&2

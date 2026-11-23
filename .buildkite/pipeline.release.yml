@@ -25,7 +25,7 @@ steps:
           darwin-artifacts:
             - dist/homebrew/Formula/quacktel.rb
 
-  # Signs keyless SLSA v1 provenance via Buildkite OIDC with no GitHub token access.
+  # Signs keyless SLSA v1 provenance via Buildkite OIDC; does not fetch the GitHub token.
   - label: ":lock: attest provenance"
     key: slsa_attest
     depends_on: release_build
@@ -42,10 +42,27 @@ steps:
             - linux_amd64
             - linux_arm64
 
+  # Validates the macOS formula before publishing so a bad formula blocks the immutable release.
+  - label: ":beer: verify homebrew formula"
+    key: verify_homebrew_formula
+    depends_on: release_build
+    agents:
+      queue: linux-small
+    retry: *release_retry
+    plugins:
+      - ./.buildkite/plugins/mise-cache: ~
+      - ./.buildkite/plugins/homebrew-tap:
+          artifact-path: dist/homebrew/Formula/quacktel.rb
+          archive: quacktel_darwin_arm64.tar.gz
+          checksum-artifact: dist/quacktel_darwin_arm64.tar.gz.sha256
+          verify-only: true
+
   # Creates the GitHub release with every asset in one shot, so it is complete before becoming immutable.
   - label: ":github: publish release"
     key: publish_release
-    depends_on: slsa_attest
+    depends_on:
+      - slsa_attest
+      - verify_homebrew_formula
     agents:
       queue: linux-small
     retry: *release_retry
@@ -60,7 +77,7 @@ steps:
             - linux_arm64
           github-token-secret: QUACKTEL_GITHUB_TOKEN
 
-  # Validates the macOS formula on every tag and pushes it to the tap on stable releases only.
+  # Pushes the validated macOS formula to the tap on stable releases only.
   - label: ":beer: update homebrew tap"
     key: update_homebrew_tap
     depends_on: publish_release

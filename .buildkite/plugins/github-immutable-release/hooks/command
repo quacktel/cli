@@ -5,12 +5,6 @@ tag="${BUILDKITE_TAG:?run this from a tag build of the release pipeline}"
 repo="${BUILDKITE_PLUGIN_GITHUB_IMMUTABLE_RELEASE_REPO:?github-immutable-release: repo configuration is required}"
 project="${BUILDKITE_PLUGIN_GITHUB_IMMUTABLE_RELEASE_PROJECT:?github-immutable-release: project configuration is required}"
 secret_name="${BUILDKITE_PLUGIN_GITHUB_IMMUTABLE_RELEASE_GITHUB_TOKEN_SECRET:?github-immutable-release: github-token-secret configuration is required}"
-archive_ext="${BUILDKITE_PLUGIN_GITHUB_IMMUTABLE_RELEASE_ARCHIVE_EXT:-tar.gz}"
-dist_dir="${BUILDKITE_PLUGIN_GITHUB_IMMUTABLE_RELEASE_DIST_DIR:-dist}"
-default_branch="${BUILDKITE_PLUGIN_GITHUB_IMMUTABLE_RELEASE_DEFAULT_BRANCH:-main}"
-require_main="${BUILDKITE_PLUGIN_GITHUB_IMMUTABLE_RELEASE_REQUIRE_MAIN:-true}"
-require_sbom="${BUILDKITE_PLUGIN_GITHUB_IMMUTABLE_RELEASE_SBOM:-true}"
-require_provenance="${BUILDKITE_PLUGIN_GITHUB_IMMUTABLE_RELEASE_PROVENANCE:-true}"
 
 targets=()
 i=0
@@ -42,13 +36,11 @@ fi
 
 git fetch --force origin "refs/tags/${tag}:refs/tags/${tag}"
 commit="$(git rev-parse "${tag}^{commit}")"
-if [[ "${require_main}" == "true" ]]; then
-  # Only reviewed code is released: the tag must point into the default branch's history.
-  git fetch --force origin "${default_branch}"
-  if ! git merge-base --is-ancestor "${commit}" FETCH_HEAD; then
-    echo "tag ${tag} (${commit}) is not on ${default_branch}" >&2
-    exit 1
-  fi
+# Only reviewed code is released: the tag must point into main's history.
+git fetch --force origin main
+if ! git merge-base --is-ancestor "${commit}" FETCH_HEAD; then
+  echo "tag ${tag} (${commit}) is not on main" >&2
+  exit 1
 fi
 
 token="$(buildkite-agent secret get "${secret_name}" 2>/dev/null)" || {
@@ -62,25 +54,16 @@ if GH_TOKEN="${token}" gh release view "${tag}" --repo "${repo}" >/dev/null 2>&1
   exit 1
 fi
 
-buildkite-agent artifact download "${dist_dir}/*" .
+buildkite-agent artifact download "dist/*" .
 
 assets=()
 for target in "${targets[@]}"; do
-  archive="${dist_dir}/${project}_${target}.${archive_ext}"
-  files=("${archive}" "${archive}.sha256")
-  check_files=("${archive}")
-  if [[ "${require_sbom}" == "true" ]]; then
-    files+=("${archive}.sbom.json" "${archive}.sbom.json.sha256")
-    check_files+=("${archive}.sbom.json")
-  fi
-  if [[ "${require_provenance}" == "true" ]]; then
-    files+=("${archive}.sigstore.json")
-  fi
-  for f in "${files[@]}"; do
+  archive="dist/${project}_${target}.tar.gz"
+  for f in "${archive}" "${archive}.sha256" "${archive}.sbom.json" "${archive}.sbom.json.sha256" "${archive}.sigstore.json"; do
     [[ -f "${f}" ]] || { echo "missing release asset ${f}" >&2; exit 1; }
     assets+=("${f}")
   done
-  for f in "${check_files[@]}"; do
+  for f in "${archive}" "${archive}.sbom.json"; do
     if [[ "$(sha256_of "${f}")" != "$(cat "${f}.sha256")" ]]; then
       echo "checksum mismatch for ${f}" >&2
       exit 1

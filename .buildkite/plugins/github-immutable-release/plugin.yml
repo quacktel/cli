@@ -21,24 +21,6 @@ configuration:
     github-token-secret:
       description: Buildkite cluster secret name holding the GitHub release token
       type: string
-    archive-ext:
-      description: Archive filename extension without leading dot
-      type: string
-    dist-dir:
-      description: Directory containing downloaded release artifacts
-      type: string
-    default-branch:
-      description: Branch checked when require-main is enabled
-      type: string
-    require-main:
-      description: Require the tag commit to be an ancestor of origin/<default-branch>
-      type: boolean
-    sbom:
-      description: Require and include .sbom.json and .sbom.json.sha256 for each target
-      type: boolean
-    provenance:
-      description: Require and include .sigstore.json provenance bundle for each target
-      type: boolean
   required:
     - repo
     - project

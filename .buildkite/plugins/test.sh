@@ -40,6 +40,22 @@ assert_not_contains() {
   fi
 }
 
+# Runs a command expected to fail, captures stderr, and checks required (and optional forbidden) output.
+assert_fails_with() {
+  local workdir="$1"
+  local want="$2"
+  local forbid="$3"
+  shift 3
+  local err_file="${tmp}/stderr.log"
+  if (cd "${workdir}" && "$@" >/dev/null 2>"${err_file}"); then
+    fail "expected failure containing '${want}', but command succeeded"
+  fi
+  assert_contains "${err_file}" "${want}"
+  if [[ -n "${forbid}" ]]; then
+    assert_not_contains "${err_file}" "${forbid}"
+  fi
+}
+
 setup_stub_bin() {
   local dir="$1"
   mkdir -p "${dir}/bin" "${dir}/store" "${dir}/work"
@@ -77,11 +93,12 @@ case "${1:-}:${2:-}" in
     echo "upload:$3" >>"${STUB_DIR}/uploads.log"
     ;;
   artifact:download)
+    rm -rf dist
     cp -R "${STUB_DIR}/store/." .
     ;;
   secret:get)
     if [[ "${STUB_SECRET_FAIL:-false}" == "true" ]]; then
-      echo "secret lookup failed" >&2
+      echo "secret-ref-leak-sentinel: lookup failed" >&2
       exit 1
     fi
     echo "super-secret-token-value"
@@ -154,6 +171,7 @@ EOF
 seed_dist() {
   local store="$1"
   local tag="$2"
+  rm -rf "${store}/dist"
   mkdir -p "${store}/dist/homebrew/Formula"
   for target in darwin_arm64 linux_amd64; do
     local archive="${store}/dist/quacktel_${target}.tar.gz"
@@ -231,10 +249,22 @@ test_slsa_attest() {
   assert_contains "${case_dir}/uploads.log" "upload:dist/quacktel_darwin_arm64.tar.gz.sigstore.json"
   assert_contains "${case_dir}/uploads.log" "upload:dist/quacktel_linux_amd64.tar.gz.sigstore.json"
 
+  # Rejects non-semver tag before interpolating into provenance JSON.
+  assert_fails_with "${case_dir}/work" "is not a vX.Y.Z[-pre] tag" "" \
+    env PATH="${case_dir}/bin:${PATH}" \
+      STUB_DIR="${case_dir}" \
+      BUILDKITE_TAG='v0.2.1",evil' \
+      BUILDKITE_ORGANIZATION_SLUG="wolfeidauci" \
+      BUILDKITE_PIPELINE_SLUG="quacktel-cli-release" \
+      BUILDKITE_BUILD_URL="https://buildkite.com/wolfeidauci/quacktel-cli-release/builds/1" \
+      BUILDKITE_PLUGIN_SLSA_ATTEST_REPO="quacktel/cli" \
+      BUILDKITE_PLUGIN_SLSA_ATTEST_PROJECT="quacktel" \
+      BUILDKITE_PLUGIN_SLSA_ATTEST_TARGETS_0="darwin_arm64" \
+      "${plugins_dir}/slsa-attest/hooks/command"
+
   # Rejects non-main commit.
-  if (
-    cd "${case_dir}/work"
-    PATH="${case_dir}/bin:${PATH}" \
+  assert_fails_with "${case_dir}/work" "is not on main" "" \
+    env PATH="${case_dir}/bin:${PATH}" \
       STUB_DIR="${case_dir}" \
       STUB_GIT_ON_MAIN="false" \
       BUILDKITE_TAG="v0.2.1-rc.1" \
@@ -244,16 +274,12 @@ test_slsa_attest() {
       BUILDKITE_PLUGIN_SLSA_ATTEST_REPO="quacktel/cli" \
       BUILDKITE_PLUGIN_SLSA_ATTEST_PROJECT="quacktel" \
       BUILDKITE_PLUGIN_SLSA_ATTEST_TARGETS_0="darwin_arm64" \
-      "${plugins_dir}/slsa-attest/hooks/command" 2>/dev/null
-  ); then
-    fail "slsa-attest should reject non-main commit"
-  fi
+      "${plugins_dir}/slsa-attest/hooks/command"
 
   # Rejects bad checksum.
   echo "0000000000000000000000000000000000000000000000000000000000000000" >"${case_dir}/store/dist/quacktel_darwin_arm64.tar.gz.sha256"
-  if (
-    cd "${case_dir}/work"
-    PATH="${case_dir}/bin:${PATH}" \
+  assert_fails_with "${case_dir}/work" "checksum mismatch" "" \
+    env PATH="${case_dir}/bin:${PATH}" \
       STUB_DIR="${case_dir}" \
       BUILDKITE_TAG="v0.2.1-rc.1" \
       BUILDKITE_ORGANIZATION_SLUG="wolfeidauci" \
@@ -262,10 +288,7 @@ test_slsa_attest() {
       BUILDKITE_PLUGIN_SLSA_ATTEST_REPO="quacktel/cli" \
       BUILDKITE_PLUGIN_SLSA_ATTEST_PROJECT="quacktel" \
       BUILDKITE_PLUGIN_SLSA_ATTEST_TARGETS_0="darwin_arm64" \
-      "${plugins_dir}/slsa-attest/hooks/command" 2>/dev/null
-  ); then
-    fail "slsa-attest should reject checksum mismatch"
-  fi
+      "${plugins_dir}/slsa-attest/hooks/command"
 }
 
 test_github_immutable_release() {
@@ -293,10 +316,44 @@ test_github_immutable_release() {
   assert_contains "${case_dir}/calls.log" "dist/quacktel_darwin_arm64.tar.gz.sigstore.json"
   assert_not_contains "${case_dir}/calls.log" "super-secret-token-value"
 
+  # Rejects bad tag.
+  assert_fails_with "${case_dir}/work" "is not a vX.Y.Z[-pre] tag" "" \
+    env PATH="${case_dir}/bin:${PATH}" \
+      STUB_DIR="${case_dir}" \
+      BUILDKITE_TAG="not-a-tag" \
+      BUILDKITE_PLUGIN_GITHUB_IMMUTABLE_RELEASE_REPO="quacktel/cli" \
+      BUILDKITE_PLUGIN_GITHUB_IMMUTABLE_RELEASE_PROJECT="quacktel" \
+      BUILDKITE_PLUGIN_GITHUB_IMMUTABLE_RELEASE_TARGETS_0="darwin_arm64" \
+      BUILDKITE_PLUGIN_GITHUB_IMMUTABLE_RELEASE_GITHUB_TOKEN_SECRET="QUACKTEL_GITHUB_TOKEN" \
+      "${plugins_dir}/github-immutable-release/hooks/command"
+
+  # Rejects non-main commit.
+  assert_fails_with "${case_dir}/work" "is not on main" "" \
+    env PATH="${case_dir}/bin:${PATH}" \
+      STUB_DIR="${case_dir}" \
+      STUB_GIT_ON_MAIN="false" \
+      BUILDKITE_TAG="v0.2.1-rc.1" \
+      BUILDKITE_PLUGIN_GITHUB_IMMUTABLE_RELEASE_REPO="quacktel/cli" \
+      BUILDKITE_PLUGIN_GITHUB_IMMUTABLE_RELEASE_PROJECT="quacktel" \
+      BUILDKITE_PLUGIN_GITHUB_IMMUTABLE_RELEASE_TARGETS_0="darwin_arm64" \
+      BUILDKITE_PLUGIN_GITHUB_IMMUTABLE_RELEASE_GITHUB_TOKEN_SECRET="QUACKTEL_GITHUB_TOKEN" \
+      "${plugins_dir}/github-immutable-release/hooks/command"
+
+  # Hides stderr from failed secret lookup.
+  assert_fails_with "${case_dir}/work" "failed to read the QUACKTEL_GITHUB_TOKEN cluster secret" "secret-ref-leak-sentinel" \
+    env PATH="${case_dir}/bin:${PATH}" \
+      STUB_DIR="${case_dir}" \
+      STUB_SECRET_FAIL="true" \
+      BUILDKITE_TAG="v0.2.1-rc.1" \
+      BUILDKITE_PLUGIN_GITHUB_IMMUTABLE_RELEASE_REPO="quacktel/cli" \
+      BUILDKITE_PLUGIN_GITHUB_IMMUTABLE_RELEASE_PROJECT="quacktel" \
+      BUILDKITE_PLUGIN_GITHUB_IMMUTABLE_RELEASE_TARGETS_0="darwin_arm64" \
+      BUILDKITE_PLUGIN_GITHUB_IMMUTABLE_RELEASE_GITHUB_TOKEN_SECRET="QUACKTEL_GITHUB_TOKEN" \
+      "${plugins_dir}/github-immutable-release/hooks/command"
+
   # Refuses existing release.
-  if (
-    cd "${case_dir}/work"
-    PATH="${case_dir}/bin:${PATH}" \
+  assert_fails_with "${case_dir}/work" "already exists" "" \
+    env PATH="${case_dir}/bin:${PATH}" \
       STUB_DIR="${case_dir}" \
       STUB_RELEASE_EXISTS="true" \
       BUILDKITE_TAG="v0.2.1-rc.1" \
@@ -304,16 +361,53 @@ test_github_immutable_release() {
       BUILDKITE_PLUGIN_GITHUB_IMMUTABLE_RELEASE_PROJECT="quacktel" \
       BUILDKITE_PLUGIN_GITHUB_IMMUTABLE_RELEASE_TARGETS_0="darwin_arm64" \
       BUILDKITE_PLUGIN_GITHUB_IMMUTABLE_RELEASE_GITHUB_TOKEN_SECRET="QUACKTEL_GITHUB_TOKEN" \
-      "${plugins_dir}/github-immutable-release/hooks/command" 2>/dev/null
-  ); then
-    fail "github-immutable-release should refuse existing release"
-  fi
+      "${plugins_dir}/github-immutable-release/hooks/command"
+
+  # Fails when a .sigstore.json provenance bundle is missing.
+  rm -f "${case_dir}/store/dist/quacktel_darwin_arm64.tar.gz.sigstore.json"
+  assert_fails_with "${case_dir}/work" "missing release asset dist/quacktel_darwin_arm64.tar.gz.sigstore.json" "" \
+    env PATH="${case_dir}/bin:${PATH}" \
+      STUB_DIR="${case_dir}" \
+      BUILDKITE_TAG="v0.2.1-rc.1" \
+      BUILDKITE_PLUGIN_GITHUB_IMMUTABLE_RELEASE_REPO="quacktel/cli" \
+      BUILDKITE_PLUGIN_GITHUB_IMMUTABLE_RELEASE_PROJECT="quacktel" \
+      BUILDKITE_PLUGIN_GITHUB_IMMUTABLE_RELEASE_TARGETS_0="darwin_arm64" \
+      BUILDKITE_PLUGIN_GITHUB_IMMUTABLE_RELEASE_GITHUB_TOKEN_SECRET="QUACKTEL_GITHUB_TOKEN" \
+      "${plugins_dir}/github-immutable-release/hooks/command"
+
+  # Rejects checksum mismatch.
+  echo '{}' >"${case_dir}/store/dist/quacktel_darwin_arm64.tar.gz.sigstore.json"
+  echo "0000000000000000000000000000000000000000000000000000000000000000" >"${case_dir}/store/dist/quacktel_darwin_arm64.tar.gz.sha256"
+  assert_fails_with "${case_dir}/work" "checksum mismatch" "" \
+    env PATH="${case_dir}/bin:${PATH}" \
+      STUB_DIR="${case_dir}" \
+      BUILDKITE_TAG="v0.2.1-rc.1" \
+      BUILDKITE_PLUGIN_GITHUB_IMMUTABLE_RELEASE_REPO="quacktel/cli" \
+      BUILDKITE_PLUGIN_GITHUB_IMMUTABLE_RELEASE_PROJECT="quacktel" \
+      BUILDKITE_PLUGIN_GITHUB_IMMUTABLE_RELEASE_TARGETS_0="darwin_arm64" \
+      BUILDKITE_PLUGIN_GITHUB_IMMUTABLE_RELEASE_GITHUB_TOKEN_SECRET="QUACKTEL_GITHUB_TOKEN" \
+      "${plugins_dir}/github-immutable-release/hooks/command"
 }
 
 test_homebrew_tap() {
   local case_dir="${tmp}/homebrew_tap"
   setup_stub_bin "${case_dir}"
   seed_dist "${case_dir}/store" "v0.2.1-rc.1"
+
+  # verify-only validates formula on stable or prerelease without needing tap config or secret.
+  (
+    cd "${case_dir}/work"
+    PATH="${case_dir}/bin:${PATH}" \
+      STUB_DIR="${case_dir}" \
+      STUB_SECRET_FAIL="true" \
+      BUILDKITE_TAG="v0.2.1-rc.1" \
+      BUILDKITE_PLUGIN_HOMEBREW_TAP_ARTIFACT_PATH="dist/homebrew/Formula/quacktel.rb" \
+      BUILDKITE_PLUGIN_HOMEBREW_TAP_ARCHIVE="quacktel_darwin_arm64.tar.gz" \
+      BUILDKITE_PLUGIN_HOMEBREW_TAP_CHECKSUM_ARTIFACT="dist/quacktel_darwin_arm64.tar.gz.sha256" \
+      BUILDKITE_PLUGIN_HOMEBREW_TAP_VERIFY_ONLY="true" \
+      "${plugins_dir}/homebrew-tap/hooks/command" >/dev/null
+  )
+  assert_not_contains "${case_dir}/calls.log" "gh api"
 
   # Prerelease with skip-prerelease=true validates formula and skips tap push without reading secret.
   (
@@ -333,25 +427,19 @@ test_homebrew_tap() {
   )
   assert_not_contains "${case_dir}/calls.log" "gh api"
 
-  # Rejects non-macOS formula even on prerelease.
+  # Rejects non-macOS formula in verify-only mode before publish.
   echo 'class Quacktel < Formula; end' >"${case_dir}/store/dist/homebrew/Formula/quacktel.rb"
-  if (
-    cd "${case_dir}/work"
-    PATH="${case_dir}/bin:${PATH}" \
+  assert_fails_with "${case_dir}/work" "missing depends_on :macos" "" \
+    env PATH="${case_dir}/bin:${PATH}" \
       STUB_DIR="${case_dir}" \
       BUILDKITE_TAG="v0.2.1-rc.1" \
-      BUILDKITE_PLUGIN_HOMEBREW_TAP_TAP="quacktel/homebrew-tap" \
-      BUILDKITE_PLUGIN_HOMEBREW_TAP_FORMULA_PATH="Formula/quacktel.rb" \
       BUILDKITE_PLUGIN_HOMEBREW_TAP_ARTIFACT_PATH="dist/homebrew/Formula/quacktel.rb" \
       BUILDKITE_PLUGIN_HOMEBREW_TAP_ARCHIVE="quacktel_darwin_arm64.tar.gz" \
       BUILDKITE_PLUGIN_HOMEBREW_TAP_CHECKSUM_ARTIFACT="dist/quacktel_darwin_arm64.tar.gz.sha256" \
-      BUILDKITE_PLUGIN_HOMEBREW_TAP_GITHUB_TOKEN_SECRET="QUACKTEL_GITHUB_TOKEN" \
-      "${plugins_dir}/homebrew-tap/hooks/command" 2>/dev/null
-  ); then
-    fail "homebrew-tap should reject invalid formula"
-  fi
+      BUILDKITE_PLUGIN_HOMEBREW_TAP_VERIFY_ONLY="true" \
+      "${plugins_dir}/homebrew-tap/hooks/command"
 
-  # Stable tag pushes formula via GitHub Contents API.
+  # Stable tag updates existing formula via GitHub Contents API with existing sha.
   seed_dist "${case_dir}/store" "v0.2.1"
   : >"${case_dir}/calls.log"
   (
@@ -369,6 +457,39 @@ test_homebrew_tap() {
   )
   assert_contains "${case_dir}/calls.log" "gh api --method PUT repos/quacktel/homebrew-tap/contents/Formula/quacktel.rb"
   assert_contains "${case_dir}/calls.log" "-f sha=existing-blob-sha-123"
+
+  # Stable tag creates formula when tap has no existing file (omits -f sha).
+  : >"${case_dir}/calls.log"
+  (
+    cd "${case_dir}/work"
+    PATH="${case_dir}/bin:${PATH}" \
+      STUB_DIR="${case_dir}" \
+      STUB_TAP_EXISTS="false" \
+      BUILDKITE_TAG="v0.2.1" \
+      BUILDKITE_PLUGIN_HOMEBREW_TAP_TAP="quacktel/homebrew-tap" \
+      BUILDKITE_PLUGIN_HOMEBREW_TAP_FORMULA_PATH="Formula/quacktel.rb" \
+      BUILDKITE_PLUGIN_HOMEBREW_TAP_ARTIFACT_PATH="dist/homebrew/Formula/quacktel.rb" \
+      BUILDKITE_PLUGIN_HOMEBREW_TAP_ARCHIVE="quacktel_darwin_arm64.tar.gz" \
+      BUILDKITE_PLUGIN_HOMEBREW_TAP_CHECKSUM_ARTIFACT="dist/quacktel_darwin_arm64.tar.gz.sha256" \
+      BUILDKITE_PLUGIN_HOMEBREW_TAP_GITHUB_TOKEN_SECRET="QUACKTEL_GITHUB_TOKEN" \
+      "${plugins_dir}/homebrew-tap/hooks/command"
+  )
+  assert_contains "${case_dir}/calls.log" "gh api --method PUT repos/quacktel/homebrew-tap/contents/Formula/quacktel.rb"
+  assert_not_contains "${case_dir}/calls.log" "-f sha="
+
+  # Hides stderr from failed secret lookup on stable tag.
+  assert_fails_with "${case_dir}/work" "failed to read the QUACKTEL_GITHUB_TOKEN cluster secret" "secret-ref-leak-sentinel" \
+    env PATH="${case_dir}/bin:${PATH}" \
+      STUB_DIR="${case_dir}" \
+      STUB_SECRET_FAIL="true" \
+      BUILDKITE_TAG="v0.2.1" \
+      BUILDKITE_PLUGIN_HOMEBREW_TAP_TAP="quacktel/homebrew-tap" \
+      BUILDKITE_PLUGIN_HOMEBREW_TAP_FORMULA_PATH="Formula/quacktel.rb" \
+      BUILDKITE_PLUGIN_HOMEBREW_TAP_ARTIFACT_PATH="dist/homebrew/Formula/quacktel.rb" \
+      BUILDKITE_PLUGIN_HOMEBREW_TAP_ARCHIVE="quacktel_darwin_arm64.tar.gz" \
+      BUILDKITE_PLUGIN_HOMEBREW_TAP_CHECKSUM_ARTIFACT="dist/quacktel_darwin_arm64.tar.gz.sha256" \
+      BUILDKITE_PLUGIN_HOMEBREW_TAP_GITHUB_TOKEN_SECRET="QUACKTEL_GITHUB_TOKEN" \
+      "${plugins_dir}/homebrew-tap/hooks/command"
 }
 
 test_goreleaser_build

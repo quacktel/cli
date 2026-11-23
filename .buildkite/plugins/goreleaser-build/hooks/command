@@ -29,26 +29,11 @@ while true; do
   i=$((i + 1))
 done
 
-extra_args=()
-i=0
-while true; do
-  var="BUILDKITE_PLUGIN_GORELEASER_BUILD_EXTRA_ARGS_${i}"
-  if [[ -z "${!var+x}" ]]; then
-    break
-  fi
-  extra_args+=("${!var}")
-  i=$((i + 1))
-done
-
 # Checkouts don't always fetch tags, and goreleaser refuses a tag that isn't on HEAD.
 git fetch --force origin "refs/tags/${tag}:refs/tags/${tag}"
 
 # Nothing is published here: downstream release plugins attest and publish every target together.
-if [[ "${#extra_args[@]}" -gt 0 ]]; then
-  GORELEASER_CURRENT_TAG="${tag}" goreleaser release --clean --skip=publish "${extra_args[@]}"
-else
-  GORELEASER_CURRENT_TAG="${tag}" goreleaser release --clean --skip=publish
-fi
+GORELEASER_CURRENT_TAG="${tag}" goreleaser release --clean --skip=publish
 
 for pattern in "${artifacts[@]}"; do
   buildkite-agent artifact upload "${pattern}"
