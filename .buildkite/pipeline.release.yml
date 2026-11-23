@@ -19,8 +19,8 @@ steps:
       - ./.buildkite/plugins/mise-cache: ~
       - ./.buildkite/plugins/go-cache:
           name: go_build
-      # v0.1.0, pinned by commit.
-      - https://github.com/wolfeidau/buildkite-release-plugins.git/goreleaser-build#9fc63581d4714568213b9359970c5f06f65f6ad8:
+      # v0.2.0, pinned by commit.
+      - https://github.com/wolfeidau/buildkite-release-plugins.git/goreleaser-build#582d0bdabdb1f689f5e4b98626d6d47171eb7cf0:
           artifacts:
             - "dist/quacktel_*.tar.gz*"
           darwin-artifacts:
@@ -35,8 +35,8 @@ steps:
     retry: *release_retry
     plugins:
       - ./.buildkite/plugins/mise-cache: ~
-      # v0.1.0, pinned by commit.
-      - https://github.com/wolfeidau/buildkite-release-plugins.git/slsa-attest#9fc63581d4714568213b9359970c5f06f65f6ad8:
+      # v0.2.0, pinned by commit.
+      - https://github.com/wolfeidau/buildkite-release-plugins.git/slsa-attest#582d0bdabdb1f689f5e4b98626d6d47171eb7cf0:
           repo: quacktel/cli
           project: quacktel
           targets:
@@ -53,8 +53,8 @@ steps:
     retry: *release_retry
     plugins:
       - ./.buildkite/plugins/mise-cache: ~
-      # v0.1.0, pinned by commit.
-      - https://github.com/wolfeidau/buildkite-release-plugins.git/homebrew-tap#9fc63581d4714568213b9359970c5f06f65f6ad8:
+      # v0.2.0, pinned by commit.
+      - https://github.com/wolfeidau/buildkite-release-plugins.git/homebrew-tap#582d0bdabdb1f689f5e4b98626d6d47171eb7cf0:
           artifact-path: dist/homebrew/Formula/quacktel.rb
           archive: quacktel_darwin_arm64.tar.gz
           checksum-artifact: dist/quacktel_darwin_arm64.tar.gz.sha256
@@ -71,8 +71,8 @@ steps:
     retry: *release_retry
     plugins:
       - ./.buildkite/plugins/mise-cache: ~
-      # v0.1.0, pinned by commit.
-      - https://github.com/wolfeidau/buildkite-release-plugins.git/github-immutable-release#9fc63581d4714568213b9359970c5f06f65f6ad8:
+      # v0.2.0, pinned by commit.
+      - https://github.com/wolfeidau/buildkite-release-plugins.git/github-immutable-release#582d0bdabdb1f689f5e4b98626d6d47171eb7cf0:
           repo: quacktel/cli
           project: quacktel
           targets:
@@ -90,8 +90,8 @@ steps:
     retry: *release_retry
     plugins:
       - ./.buildkite/plugins/mise-cache: ~
-      # v0.1.0, pinned by commit.
-      - https://github.com/wolfeidau/buildkite-release-plugins.git/homebrew-tap#9fc63581d4714568213b9359970c5f06f65f6ad8:
+      # v0.2.0, pinned by commit.
+      - https://github.com/wolfeidau/buildkite-release-plugins.git/homebrew-tap#582d0bdabdb1f689f5e4b98626d6d47171eb7cf0:
           tap: quacktel/homebrew-tap
           formula-path: Formula/quacktel.rb
           artifact-path: dist/homebrew/Formula/quacktel.rb
