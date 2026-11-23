@@ -2,64 +2,63 @@
 set -euo pipefail
 
 tag="${BUILDKITE_TAG:?run this from a tag build of the release pipeline}"
-repo="quacktel/cli"
-tap="quacktel/homebrew-tap"
-formula="Formula/quacktel.rb"
-targets=(darwin_arm64 linux_amd64 linux_arm64)
+repo="${BUILDKITE_PLUGIN_SLSA_ATTEST_REPO:?slsa-attest: repo configuration is required}"
+project="${BUILDKITE_PLUGIN_SLSA_ATTEST_PROJECT:?slsa-attest: project configuration is required}"
+
+targets=()
+i=0
+while true; do
+  var="BUILDKITE_PLUGIN_SLSA_ATTEST_TARGETS_${i}"
+  if [[ -z "${!var+x}" ]]; then
+    break
+  fi
+  targets+=("${!var}")
+  i=$((i + 1))
+done
+if [[ "${#targets[@]}" -eq 0 ]]; then
+  echo "slsa-attest: targets configuration is required" >&2
+  exit 1
+fi
+
+sha256_of() {
+  if command -v sha256sum >/dev/null 2>&1; then
+    sha256sum "$1" | cut -d' ' -f1
+  else
+    shasum -a 256 "$1" | cut -d' ' -f1
+  fi
+}
 
 # The tag is interpolated into the provenance JSON below, so it must be a plain semver tag.
 if [[ ! "${tag}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.]+)?$ ]]; then
   echo "tag ${tag} is not a vX.Y.Z[-pre] tag" >&2
   exit 1
 fi
+
 git fetch --force origin "refs/tags/${tag}:refs/tags/${tag}"
 commit="$(git rev-parse "${tag}^{commit}")"
-# Only reviewed code is released: the tag must point into main's history.
+# Only reviewed code is attested: the tag must point into main's history.
 git fetch --force origin main
 if ! git merge-base --is-ancestor "${commit}" FETCH_HEAD; then
   echo "tag ${tag} (${commit}) is not on main" >&2
   exit 1
 fi
 
-token="$(buildkite-agent secret get QUACKTEL_GITHUB_TOKEN 2>/dev/null)" || {
-  echo "failed to read the QUACKTEL_GITHUB_TOKEN cluster secret" >&2
-  exit 1
-}
-
-# Immutable releases can't be changed once published, so a re-run must cut a new tag instead.
-if GH_TOKEN="${token}" gh release view "${tag}" --repo "${repo}" >/dev/null 2>&1; then
-  echo "release ${tag} already exists; tag a new version instead" >&2
-  exit 1
-fi
-
 buildkite-agent artifact download "dist/*" .
 
-assets=()
 for target in "${targets[@]}"; do
-  archive="dist/quacktel_${target}.tar.gz"
+  archive="dist/${project}_${target}.tar.gz"
   for f in "${archive}" "${archive}.sha256" "${archive}.sbom.json" "${archive}.sbom.json.sha256"; do
     [[ -f "${f}" ]] || { echo "missing release asset ${f}" >&2; exit 1; }
-    assets+=("${f}")
   done
   for f in "${archive}" "${archive}.sbom.json"; do
-    if [[ "$(sha256sum "${f}" | cut -d' ' -f1)" != "$(cat "${f}.sha256")" ]]; then
+    if [[ "$(sha256_of "${f}")" != "$(cat "${f}.sha256")" ]]; then
       echo "checksum mismatch for ${f}" >&2
       exit 1
     fi
   done
 done
-[[ -f "dist/homebrew/${formula}" ]] || { echo "missing dist/homebrew/${formula}" >&2; exit 1; }
-# The tap serves macOS only, so the formula must point at this tag's darwin archive and its checksum.
-darwin="quacktel_darwin_arm64.tar.gz"
-for want in "depends_on :macos" "releases/download/${tag}/${darwin}\"" "sha256 \"$(cat "dist/${darwin}.sha256")\""; do
-  if ! grep -qF -- "${want}" "dist/homebrew/${formula}"; then
-    echo "formula is not the macOS formula for ${tag}: missing ${want}" >&2
-    exit 1
-  fi
-done
 
 # SLSA v1 provenance, signed keyless with this job's Buildkite OIDC identity (Fulcio cert, Rekor entry).
-# It attests that this build of ${commit} published these digests; the archives were compiled by the release_build jobs.
 cat >dist/provenance.json <<JSON
 {
   "buildDefinition": {
@@ -84,23 +83,9 @@ cat >dist/provenance.json <<JSON
 JSON
 
 for target in "${targets[@]}"; do
-  archive="quacktel_${target}.tar.gz"
+  archive="${project}_${target}.tar.gz"
   # Run from dist so the attestation subject is the bare asset name.
   (cd dist && cosign attest-blob --yes --oidc-provider buildkite-agent --type slsaprovenance1 \
     --predicate provenance.json --bundle "${archive}.sigstore.json" "${archive}")
-  assets+=("dist/${archive}.sigstore.json")
+  buildkite-agent artifact upload "dist/${archive}.sigstore.json"
 done
-
-flags=(--repo "${repo}" --verify-tag --title "${tag}" --notes "")
-if [[ "${tag}" == *-* ]]; then
-  flags+=(--prerelease)
-fi
-
-# gh uploads the assets to a draft and publishes it last, so the release is complete when it becomes immutable.
-GH_TOKEN="${token}" gh release create "${tag}" "${flags[@]}" "${assets[@]}"
-
-sha="$(GH_TOKEN="${token}" gh api "repos/${tap}/contents/${formula}" --jq .sha)"
-GH_TOKEN="${token}" gh api --method PUT "repos/${tap}/contents/${formula}" --silent \
-  -f message="Brew formula update for quacktel version ${tag}" \
-  -f content="$(base64 <"dist/homebrew/${formula}" | tr -d '\n')" \
-  -f sha="${sha}"
