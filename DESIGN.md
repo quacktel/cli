@@ -629,7 +629,9 @@ because `duckdb-go` ships prebuilt static DuckDB libraries.
 
 **Releases** run on a separate pipeline, `quacktel-cli-release`
 (`.buildkite/pipeline.release.yml`), which builds only `vX.Y.Z[-pre]` tags and
-never branches or pull requests. Pushing a tag on `main` releases it.
+never branches or pull requests. Pushing a tag on `main` releases it. Release
+steps use the subdirectory plugins in `wolfeidau/buildkite-release-plugins`,
+pinned by full commit SHA.
 
 1. **Build** (`goreleaser-build` plugin, one job per target): `goreleaser release
    --skip=publish` makes the archive, `.sha256`, SPDX SBOM (syft) and, on
@@ -772,10 +774,11 @@ Not reused: Substrait, Participle SQL, and the custom executor.
 - **DuckDB hardening semantics vary by version.** They are verified in M0 and
   covered by tests that must fail if a setting stops taking effect.
 - **Provenance trusts the release pipeline:** anyone who can edit
-  `pipeline.release.yml` or the local release plugins on `main`, or push a `v*`
-  tag on `main`, can produce signed provenance. Its claims (tag, commit) are
-  made by the signer. `QUACKTEL_GITHUB_TOKEN` and the Buildkite OIDC signing
-  identity are both scoped to the release pipeline as a whole, so every job in
+  `pipeline.release.yml` on `main`, or push a `v*` tag on `main`, can produce
+  signed provenance (release plugins in `wolfeidau/buildkite-release-plugins`
+  are pinned by full commit SHA). Its claims (tag, commit) are made by the
+  signer. `QUACKTEL_GITHUB_TOKEN` and the Buildkite OIDC signing identity are
+  both scoped to the release pipeline as a whole, so every job in
   `quacktel-cli-release` shares the same secret and signing scope. Builds don't
   rerun tests; the tag's commit must be on `main`, which CI gates.
 - **Releases can't be fixed in place:** with immutable releases, a bad release
